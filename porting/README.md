@@ -18,7 +18,7 @@ Honest accounting of what has and has not been proven.
 | **Kernel compiles** (CI run 38997330115, 22m34s, all steps green) | ✅ **done** |
 | **`Image` is a valid arm64 boot image** (magic `ARMd`, 47.4 MiB) | ✅ verified |
 | **Device tree built and carries the right bindings** | ✅ verified |
-| **initramfs built, with a target-architecture busybox** | ✅ verified *after a fix — see below* |
+| **initramfs contains a target-architecture busybox** | ⏳ **pending — no green run has demonstrated it yet** |
 | **Board can enter the kernel this produces** | ❌ **no — boot chain not delivered** |
 | **Boots on hardware** | ❌ not yet |
 
@@ -28,7 +28,7 @@ Build artifacts of the verified run:
 |---|---|---|
 | `Image` | 47.4 MiB | header magic `0x644d5241` (`ARMd`); `image_size` 48.2 MiB, the delta being BSS |
 | `hi3798mv300-hi3798mv3dmm.dtb` | 3.3 KiB | `compatible` contains `hisilicon,hi3798mv300`; `serial@{8b00000,8b02000,8b03000}` bound to `arm,pl011`; uart0 `okay` |
-| `initramfs.cpio.gz` | 1.06 MiB | static **aarch64** busybox |
+| `initramfs.cpio.gz` | 1.06 MiB | ~~static aarch64 busybox~~ — **this was x86-64 in runs 1-3**; fixed in `a6290cf92`, not yet confirmed green |
 | `kernel.config` | — | `Linux/arm64 6.18.57` |
 
 > **Correction: the first two runs shipped a broken initramfs, and this table
@@ -42,8 +42,18 @@ Build artifacts of the verified run:
 > `make-initramfs.sh` now asserts the ELF machine, CI cross-builds busybox
 > with `aarch64-linux-gnu-gcc` instead of trusting a host binary, and a
 > "Verify artifact contents" step inspects what is actually inside the
-> archive. Everything below marked "verified" is verified *by that check*,
-> not by a file existing.
+> archive.
+>
+> **And then the same mistake was made again, in the fix commit itself.** The
+> first draft of this very paragraph marked the new initramfs "✅ verified"
+> while the only CI run for that commit was still `in_progress` — the exact
+> anti-pattern being apologised for, one paragraph above its own apology. A
+> second audit caught it. The status row now reads "pending" and will stay
+> that way until the run is green and its hashes can be quoted here.
+>
+> The lesson worth keeping: an `ls`-style check and a green tick are not
+> evidence. A claim of "verified" has to name the run, the check, and the
+> value observed.
 
 The build is deterministic where it matters. A second run (38998979429) was
 made after removing a dead `CONFIG_ARM_GIC_V3=n` line to confirm it changed
@@ -53,11 +63,18 @@ nothing:
 |---|---|---|---|
 | `.config` | `edd876a7…` | `edd876a7…` | byte-identical |
 | DTB | `97dd1e31…` | `97dd1e31…` | bit-identical |
-| `Image` | `89be6fef…` | `51292938…` | differs **only** in the embedded build timestamp (`Sat Oct 17 03:26:02` vs `03:51:55 UTC 2026`); same size, same compiler, same version |
+| `Image` | `89be6fef…` | `51292938…` | 34 bytes differ — see below |
 
-So the `Image` and `initramfs.cpio.gz` hashes are *not* reproducible across
-runs — the kernel embeds a build date and cpio records file times. Compare
-`.config` or the DTB when checking whether a change altered behaviour.
+An earlier revision of this row said the `Image` "differs **only** in the
+embedded build timestamp". That was wrong, and `cmp -l` shows why: of the 34
+bytes, 8 are the two `UTS_VERSION` timestamp copies, **20 are the GNU
+build-id note** (a hash derived from the whole link), and **6 are three cpio
+mtime fields inside the default initramfs the kernel embeds**. The third is an
+independent source of nondeterminism — nothing to do with the build clock.
+
+So `Image` and `initramfs.cpio.gz` hashes are *not* reproducible across runs.
+Compare `.config` or the DTB when checking whether a change altered the
+**build inputs**; neither tells you anything about runtime behaviour.
 
 > **Still unproven: everything past the compiler.** The kernel has never been
 > executed. Compilation confirms the device trees and configuration are
@@ -108,19 +125,39 @@ register layouts**, verified by diffing the two device trees:
 
 | Block | BSP `hi3798mv300.dts` | mainline `hi3798cv200.dtsi` | Match |
 |---|---|---|---|
-| GIC distributor | `0xf1001000` | `0xf1001000` | identical |
-| GIC CPU interface | `0xf1002000` | `0xf1002000` | identical |
-| CRG (clock/reset) | `0xf8a22000` | `0xf8a22000` | identical, **but not implemented here** |
-| PERICTRL | `0xf8a20000` | `0xf8a20000` | identical, **but not implemented here** |
+| GIC distributor | `0xf1001000` | `0xf1001000` | same base |
+| GIC CPU interface | `0xf1002000` | `0xf1002000` | same base; **window sizes differ** — BSP `0x100`, cv200 `0x2000` |
+| CRG (clock/reset) | `0xF8A22000` | `0xf8a22000` | identical, **but not implemented here** |
+| PERICTRL | `0xF8A20000` | `0xf8a20000` | identical, **but not implemented here** |
 | UART0 | `0xf8b00000`, SPI 49 | `0xf8b00000`, SPI 49 | identical |
 | UART2 | `0xf8b02000`, SPI 51 | `0xf8b02000`, SPI 51 | identical |
 | UART3 | `0xf8b03000`, SPI 52 | *cv200 has no uart3* | BSP-only |
 
-Two caveats an earlier revision of this file glossed over. The CRG and
-PERICTRL rows describe hardware that genuinely matches, but stage 1 does not
-instantiate either node — it uses fixed-clock placeholders — so they are not
-part of the delivered port. And `uart3` has no cv200 counterpart, so its
-provenance is the BSP alone, not a cross-check.
+**Grep this file with `-i`.** The CRG and PERICTRL rows were once challenged on
+the grounds that neither address appears in the BSP device tree. They do — at
+`hi3798mv300.dts:528`, written in **uppercase** hex:
+
+```
+reg = <0xF8A22000 0x400>, <0xF8A20000 0x0848>;
+```
+
+A case-sensitive `grep 8a22000` finds nothing and the provenance looks
+invented. It is not; the BSP just capitalises its hex, and an auditor (and
+anyone else sanity-checking this table) needs `-i`. Worth knowing before
+concluding a value here is unsourced.
+
+Two caveats an earlier revision glossed over. The CRG and PERICTRL rows
+describe hardware that genuinely matches, but stage 1 does not instantiate
+either node — it uses fixed-clock placeholders — so they are not part of the
+delivered port. And `uart3` has no cv200 counterpart, so its provenance is the
+BSP alone, not a cross-check.
+
+The GIC rows are "same base" rather than "identical" because the BSP's window
+sizes are not cv200's: the BSP declares two regions with a `0x100` CPU
+interface, a legacy A9 idiom, while a GIC-400's CPU interface is 8 KiB and
+cv200 declares four regions. The port adopts the **cv200** layout, not the
+BSP's — deliberately, since `gic_check_eoimode()` needs at least 8 KiB — so
+the BSP column is documenting the source, not the result.
 
 Also unverified: the GICH/GICV windows (`0xf1004000`/`0xf1006000`) are copied
 from cv200 as ARM's standard GIC-400 layout. No BSP or ATF source attests them
@@ -227,16 +264,42 @@ Ordered by dependency, not by size:
 ## Stage 3 — the media stack
 
 This is the large one and is **out of scope** for the current effort.
-`source/msp/drv` is 262 MB across 1 735 `.c` files, all written against 4.4
+`source/msp` is 262 MB across 1 735 `.c` files (`source/msp/drv` alone is
+151 MB / 1 477 `.c`; the rest is `source/msp/api`), all written against 4.4
 APIs. See `api-drift-report.md` for the census; headline numbers:
 
-- **1 071 BLOCKER hits** (will not compile), 668 MAJOR, 988 MINOR
+- **1 071 hits matching removed-or-changed-API patterns**, 668 MAJOR,
+  988 MINOR. Read these as a **heuristic upper bound, not a compiler-verified
+  count**: they are regex matches, the tree has never been compiled by
+  anything, and the rules have known errors in both directions. At least one
+  rule (`create_workqueue`, `create_singlethread_workqueue`) flags APIs that
+  are *still live macros* in 6.18, while `ioremap_nocache` and `get_seconds`
+  are filed as cleanup/MAJOR when they are in fact gone. Do not plan capacity
+  from these numbers without fixing the rules first — see "Fixing the census".
 - The single worst offender is `set_fs()`/`get_fs()`, removed in 5.10 —
   **96 files**. The BSP uses the old "point userspace at kernel memory"
   trick instead of `copy_to_user()`. Each site needs a real replacement,
   so this is not a mechanical sed.
 - Worst subsystems by distinct blocker rules: `wifi` (16),
-  `gpu` (10), `bluetooth` (6), `vfmw` (5)
+  `gpu` (10), `bluetooth` (6), `vfmw` (5). Note the ranking metric is
+  *rule-category diversity*, which ignores subsystem size and edit
+  difficulty, and the scan roots sum mutually exclusive driver trees —
+  `source/component/wifi/drv/Makefile:21` selects one of ~25 families and
+  `source/msp/drv/gpu/Makefile:20` selects `utgard` xor `midgard`. So
+  `wifi`'s totals count code that is never compiled together, and the
+  build-relevant `set_fs` footprint is nearer 31 files than 96.
+
+### Fixing the census before trusting it
+
+The scanner needs four corrections before its output can schedule work:
+drop the rules whose APIs still exist; reclassify `ioremap_nocache` and
+`get_seconds` to BLOCKER; add the **arm64** rules the port actually needs
+(`#include <mach/...>` alone is 198 hits over 108 files, plus
+`dma_*_writecombine`, `asm/mach-types.h`, `mcr p15`); and add
+`struct timeval`, which is 176 hits over 94 files and, being `#ifndef
+__KERNEL__`-guarded in 6.18, is a larger compile break than the
+`struct timespec` rule that already exists. Restrict the scan to the board's
+`CFG_HI_*` selection and count distinct files, not regex matches.
 
 Suggested order for stage 3, cheapest-first: `keyled`/`ir`/`adac` (1 rule
 each) → `demux`/`vi`/`adsp` → `vdec`/`venc` → `vo`/`vpss`/`hdmi` → `vfmw` →
@@ -276,20 +339,30 @@ Ranked by how likely they are to invalidate the approach, not by effort.
    range would DMA over live page-allocator memory — silent corruption, not a
    clean failure. The base must be derived from `source/common/drv/mmz`, not
    guessed.
-4. **The architected timer is the only clocksource and has no fallback.** The
+4. **Firmware-resident memory sits inside the DT's 1 GiB, and nothing reserves
+   it.** This is the same failure mode as risk 3 and is easy to miss because
+   the two halves are stated separately: risk 1 notes that BL31 is moved to
+   `0x4400000`, and risk 3 notes that the DT memory node is the sole authority
+   for the full 1 GiB. Put together, `reg = <0x0 0x0 0x0 0x40000000>` covers
+   the live BL31 image (68 MiB in) as well as any BL32/TEE window, with no
+   `reserved-memory` node anywhere. On a bare-metal EL1 boot with PSCI present
+   this is mostly latent, because the kernel does not write there — but it is
+   one allocation away from handing out memory the firmware is still using.
+   Fix it in the same change that adds the MMZ region, not later.
+5. **The architected timer is the only clocksource and has no fallback.** The
    BSP declined to use it (`#if 0`, vendor `hisp804` instead) and no mainline
    `hisp804` driver exists. A53 always integrates the generic timer and
    firmware programs `CNTFRQ`, so this should work — but it is a hardware
    checkpoint. The boot log line to look for is
    `cp15 timer(s) running at 24.00MHz`.
-5. **Nothing in this port has ever executed.** Every "verified" claim above is
+6. **Nothing in this port has ever executed.** Every "verified" claim above is
    a claim about *building*, not running.
-6. **The vendor media stack — the actual product functionality — is entirely
+7. **The vendor media stack — the actual product functionality — is entirely
    unported**, and per `api-drift-report.md` is the larger half of the work.
-7. **Cache geometry in the DT is informational.** The L2 `cache-size` mirrors
+8. **Cache geometry in the DT is informational.** The L2 `cache-size` mirrors
    the CV200 4×A53 cluster; on arm64 the DT wins for sysfs only, and the
    kernel's real geometry comes from CLIDR/CCSIDR. Not a functional risk.
-8. **`CONFIG_COMPAT` is load-bearing** for the "userspace keeps working" claim,
+9. **`CONFIG_COMPAT` is load-bearing** for the "userspace keeps working" claim,
    and it is conditional (`depends on ARM64_4K_PAGES || EXPERT`). The fragment
    now pins `ARM64_4K_PAGES` so a future page-size line cannot silently drop
    the entire AArch32 userspace.

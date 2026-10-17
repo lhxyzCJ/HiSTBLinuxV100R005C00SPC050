@@ -2,6 +2,45 @@
 
 Scanned **11466** C/H files under: `source/msp`, `source/component`
 
+Reproduce with:
+
+```
+python3 porting/scan_vendor_apis.py source/msp source/component \
+    > porting/api-drift-report.md
+```
+
+## Read this before quoting any number below
+
+This census is a **heuristic upper bound on porting work, not a measurement of
+it**, and an independent audit found errors in both directions:
+
+- **"Hits" are regex matches, not code sites.** `set_fs` and `get_fs` match
+  the *same* 96 files (587 hits between them), so the BLOCKER total counts one
+  body of work twice. Per-rule file counts sum to 522 against 1071 hits.
+- **Some BLOCKER rules are wrong.** `create_workqueue`,
+  `create_singlethread_workqueue` and `ndo_do_ioctl` still exist in 6.18
+  (`include/linux/workqueue.h:596,601`, `include/linux/netdevice.h:1431`) —
+  101 phantom blockers. `\.ioctl\s*=` matches 22 times and finds zero real
+  `file_operations` sites.
+- **Some severities are inverted.** `ioremap_nocache` is filed MINOR
+  ("folded into ioremap") but is *gone* from 6.18 — 142 hits that will not
+  compile. `get_seconds` is filed MAJOR and is likewise gone.
+- **The port targets arm64 and these rules do not know it.** There are no
+  arch-specific rules at all, yet `#include <mach/...>` alone is 198 hits
+  across 108 files and cannot compile on arm64. `struct timeval` (176 hits /
+  94 files) is also missing: 6.18 guards it behind `#ifndef __KERNEL__`.
+- **The scan roots sum mutually exclusive driver trees.**
+  `source/component/wifi/drv/Makefile:21` selects one of ~25 wifi families;
+  `source/msp/drv/gpu/Makefile:20` selects `utgard` xor `midgard`. So the
+  subsystem totals aggregate code that is never compiled together.
+- **Comment, string, `#if 0` and patch-payload text are all counted**, and
+  ~215 of the 11466 files are userspace (openssl, freetype, harfbuzz, ...)
+  where kernel-API drift is meaningless.
+
+Roughly 28-38% of the 2727 raw hits correspond to real work. Treat the
+subsystem ranking as a hypothesis to be re-derived after the rules are fixed
+(see "Fixing the census" in `README.md`), not as a schedule.
+
 ## Severity summary (raw hits)
 
 | Severity | Hits | Meaning |
