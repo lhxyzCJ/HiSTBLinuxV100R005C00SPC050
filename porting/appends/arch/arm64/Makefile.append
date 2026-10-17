@@ -25,5 +25,14 @@
 
 PHONY += uImage
 
+# Depend on dtbs so that `make uImage` works from a clean tree.
+#
+# arch/arm64/boot/Makefile does not include the dts Makefile (the 4.4 BSP did),
+# so the DTB is not buildable from inside the boot directory: the uImage rule
+# there names the .dtb as a plain file prerequisite and relies on it already
+# existing. This line is what guarantees that. It mirrors exactly how upstream
+# handles image.fit -- `image.fit: dtbs` a few lines above in this file.
+uImage: dtbs
+
 uImage: vmlinux
 	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@

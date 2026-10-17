@@ -42,7 +42,13 @@ UIMAGE_LOADADDR = 0x2000000
 UIMAGE_ENTRYADDR = $(TEXT_OFFSET)
 UIMAGE_COMPRESSION = none
 
-HI3798MV300_DTB := $(obj)/dts/hi3798mv300-hi3798mv3dmm.dtb
+# The DTB lives in the hisilicon/ subdirectory of the arm64 dts tree, which is
+# where the overlay installs it (mainline keeps vendor trees one level down;
+# the 4.4 BSP used a flat arch/arm/boot/dts/ because it was an arm32 tree).
+# Getting this path wrong fails as "No rule to make target
+# 'arch/arm64/boot/dts/<name>.dtb'", which reads like the DTB was never built
+# rather than like a typo in the prerequisite.
+HI3798MV300_DTB := $(obj)/dts/hisilicon/hi3798mv300-hi3798mv3dmm.dtb
 
 quiet_cmd_hi3798mv300_uimage = UIMAGE  $@
       cmd_hi3798mv300_uimage =					\
