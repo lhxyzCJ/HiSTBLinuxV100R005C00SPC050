@@ -11,6 +11,17 @@ name: kernel-6.18-hi3798mv300
 on:
   push:
     branches: [test, master]
+    paths-ignore:
+      # Documentation and repo housekeeping do not change what CI builds, and
+      # a full build here costs ~22 minutes.
+      #
+      # Deliberately NOT ignoring porting/** -- porting/overlay/ (device trees)
+      # and porting/config/ (kernel config fragment) are build inputs. Broad
+      # path filters that swallow them would let a real code change land
+      # without ever being compiled, which defeats the entire point of making
+      # CI the only build path.
+      - '**.md'
+      - '.gitignore'
   pull_request:
   workflow_dispatch:
     inputs:
@@ -21,10 +32,6 @@ on:
 
 env:
   KERNEL_VERSION: ${{ github.event.inputs.kernel_version || '6.18.57' }}
-  # sha256 of linux-6.18.57.tar.xz from kernel.org sha256sums.asc.
-  # Used when building the default version; other versions are verified
-  # against the published sums fetched at build time.
-  KERNEL_SHA256_6_18_57: "5bd9acdc82ec5efc3790ae840e5aaa40dfde7efff261cf6dde902dc570acf98c"
   ARCH: arm64
   CROSS_COMPILE: aarch64-linux-gnu-
   # 32-bit compat toolchain. Required for CONFIG_COMPAT_VDSO to survive

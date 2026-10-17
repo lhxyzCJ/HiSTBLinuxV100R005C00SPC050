@@ -32,6 +32,20 @@ Build artifacts of the verified run:
 
 All three binaries pass `sha256sum -c SHA256SUMS`.
 
+The build is deterministic where it matters. A second run (38998979429) was
+made after removing a dead `CONFIG_ARM_GIC_V3=n` line to confirm it changed
+nothing:
+
+| Output | run 38997330115 | run 38998979429 | Verdict |
+|---|---|---|---|
+| `.config` | `edd876a7…` | `edd876a7…` | byte-identical |
+| DTB | `97dd1e31…` | `97dd1e31…` | bit-identical |
+| `Image` | `89be6fef…` | `51292938…` | differs **only** in the embedded build timestamp (`Sat Oct 17 03:26:02` vs `03:51:55 UTC 2026`); same size, same compiler, same version |
+
+So the `Image` and `initramfs.cpio.gz` hashes are *not* reproducible across
+runs — the kernel embeds a build date and cpio records file times. Compare
+`.config` or the DTB when checking whether a change altered behaviour.
+
 > **Still unproven: everything past the compiler.** The kernel has never been
 > executed. Compilation confirms the device trees and configuration are
 > self-consistent, but says nothing about whether the firmware hands control
