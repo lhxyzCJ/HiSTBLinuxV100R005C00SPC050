@@ -69,11 +69,20 @@ jobs:
           # the x86-64 busybox got into an arm64 initramfs; the workflow now
           # cross-builds busybox from source, and leaving a host busybox on
           # PATH only invites the same mistake back.
+          # libc6-dev-arm64-cross is NOT optional and NOT pulled in
+          # automatically: gcc-aarch64-linux-gnu only *Recommends* it, and the
+          # --no-install-recommends below therefore skips it. The kernel does
+          # not care (it is freestanding), but busybox is a userspace program:
+          # without the aarch64 libc headers, GCC's #include_next <limits.h>
+          # falls through to the host's /usr/include and dies on
+          # "bits/libc-header-start.h: No such file or directory".
           sudo apt-get install -y --no-install-recommends \
             gcc-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu \
+            libc6-dev-arm64-cross \
             gcc-arm-linux-gnueabihf \
             binutils-arm-linux-gnueabihf \
+            libc6-dev-armhf-cross \
             bc bison flex \
             libssl-dev libelf-dev \
             device-tree-compiler \
@@ -97,6 +106,21 @@ jobs:
               printf '  ok   %s\n' "$t"
             else
               printf '::error::required tool missing: %s\n' "$t"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+
+          # Tool presence is not enough -- the cross toolchains also need their
+          # target libc headers, which is a separate package and a separate way
+          # to fail 20 minutes into a run.
+          for h in /usr/aarch64-linux-gnu/include/limits.h \
+                   /usr/aarch64-linux-gnu/include/stdio.h \
+                   /usr/arm-linux-gnueabihf/include/limits.h; do
+            if [ -r "$h" ]; then
+              printf '  ok   %s\n' "$h"
+            else
+              printf '::error::cross libc header missing: %s (install libc6-dev-*-cross)\n' "$h"
               missing=1
             fi
           done
