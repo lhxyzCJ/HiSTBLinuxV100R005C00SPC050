@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Board device tree for the Hi3798M V300 "hi3798mv3dmm" reference board
+ * (DDR3-1866, 1 GiB, 16bit x2, 4 layers).
+ *
+ * Mirrors the board identity selected by the 4.4 BSP configuration
+ * configs/hi3798mv300/hi3798mv3dmm_hi3798mv300_cfg.mak
+ * (CFG_HI_BOOT_REG_NAME = hi3798mv3dmm_hi3798mv300_DDR3-1866_1GB_16bitx2_4layers.reg).
+ */
+
+/dts-v1/;
+
+#include "hi3798mv300.dtsi"
+
+/ {
+	model = "Hisilicon Hi3798M V300 (hi3798mv3dmm)";
+	compatible = "hisilicon,hi3798mv300";
+
+	aliases {
+		serial0 = &uart0;
+		serial2 = &uart2;
+		serial3 = &uart3;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+		/*
+		 * earlycon is deliberate: it gets output out of the kernel
+		 * before the PL011 driver has probed, which is exactly what we
+		 * need while validating the bring-up.
+		 */
+		bootargs = "console=ttyAMA0,115200 earlycon=pl011,0xf8b00000";
+	};
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0x0 0x0 0x0 0x40000000>;	/* 1 GiB */
+	};
+};
+
+&uart0 {
+	status = "okay";
+};

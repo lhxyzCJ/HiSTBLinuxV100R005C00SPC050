@@ -1,0 +1,205 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * HiSilicon Hi3798M V300 (hi3798mv300) SoC device tree.
+ *
+ * Forward-ported from the HiSTBLinux V100R005 BSP (Linux 4.4.35) tree,
+ * arch/arm/boot/dts/hi3798mv300.dts, rebuilt for mainline arm64 bindings.
+ *
+ * The skeleton, node naming and mainline bindings follow
+ * arch/arm64/boot/dts/hisilicon/hi3798cv200.dtsi, which is the mainline-
+ * supported sibling of this SoC. Register windows below were taken from the
+ * 4.4 BSP device tree, not guessed:
+ *
+ *   GIC-400      0xf1001000   (identical to hi3798cv200)
+ *   CRG          0xf8a22000   (identical to hi3798cv200 crg)
+ *   PERICTRL     0xf8a20000   (identical to hi3798cv200 perictrl)
+ *   UART0/2/3    0xf8b00000 / 0xf8b02000 / 0xf8b03000, SPI 49 / 51 / 52
+ *                             (bit-identical to hi3798cv200)
+ *
+ * Stage 1 scope: enough of the SoC to reach a userspace shell over the
+ * PL011 debug UART with an initramfs. Clocks are modelled as fixed-clock
+ * placeholders so that bring-up does not yet depend on the CRG driver;
+ * see porting/README.md for the roadmap that replaces them.
+ */
+
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+
+/ {
+	compatible = "hisilicon,hi3798mv300";
+	interrupt-parent = <&gic>;
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	psci {
+		compatible = "arm,psci-0.2";
+		method = "smc";
+	};
+
+	cpus {
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			compatible = "arm,cortex-a53";
+			device_type = "cpu";
+			reg = <0x0 0x0>;
+			enable-method = "psci";
+			d-cache-size = <0x8000>; /* 32 KiB */
+			d-cache-line-size = <64>;
+			d-cache-sets = <128>;
+			i-cache-size = <0x8000>; /* 32 KiB */
+			i-cache-line-size = <64>;
+			i-cache-sets = <256>;
+			next-level-cache = <&L2>;
+		};
+
+		cpu@1 {
+			compatible = "arm,cortex-a53";
+			device_type = "cpu";
+			reg = <0x0 0x1>;
+			enable-method = "psci";
+			d-cache-size = <0x8000>;
+			d-cache-line-size = <64>;
+			d-cache-sets = <128>;
+			i-cache-size = <0x8000>;
+			i-cache-line-size = <64>;
+			i-cache-sets = <256>;
+			next-level-cache = <&L2>;
+		};
+
+		cpu@2 {
+			compatible = "arm,cortex-a53";
+			device_type = "cpu";
+			reg = <0x0 0x2>;
+			enable-method = "psci";
+			d-cache-size = <0x8000>;
+			d-cache-line-size = <64>;
+			d-cache-sets = <128>;
+			i-cache-size = <0x8000>;
+			i-cache-line-size = <64>;
+			i-cache-sets = <256>;
+			next-level-cache = <&L2>;
+		};
+
+		cpu@3 {
+			compatible = "arm,cortex-a53";
+			device_type = "cpu";
+			reg = <0x0 0x3>;
+			enable-method = "psci";
+			d-cache-size = <0x8000>;
+			d-cache-line-size = <64>;
+			d-cache-sets = <128>;
+			i-cache-size = <0x8000>;
+			i-cache-line-size = <64>;
+			i-cache-sets = <256>;
+			next-level-cache = <&L2>;
+		};
+	};
+
+	/*
+	 * L2 cache geometry is informational; the kernel reads the real values
+	 * from CLIDR/CCSIDR. Values mirror the 4x Cortex-A53 cluster used on the
+	 * hi3798cv200 sibling.
+	 */
+	L2: l2-cache {
+		compatible = "cache";
+		cache-unified;
+		cache-size = <0x80000>; /* 512 KiB */
+		cache-line-size = <64>;
+		cache-sets = <512>;
+		cache-level = <2>;
+	};
+
+	gic: interrupt-controller@f1001000 {
+		compatible = "arm,gic-400";
+		reg = <0x0 0xf1001000 0x0 0x1000>,  /* GICD */
+		      <0x0 0xf1002000 0x0 0x2000>,  /* GICC */
+		      <0x0 0xf1004000 0x0 0x2000>,  /* GICH */
+		      <0x0 0xf1006000 0x0 0x2000>;  /* GICV */
+		interrupts = <GIC_PPI 9 (GIC_CPU_MASK_SIMPLE(4) |
+			      IRQ_TYPE_LEVEL_HIGH)>;
+		#address-cells = <0>;
+		#interrupt-cells = <3>;
+		interrupt-controller;
+	};
+
+	timer {
+		compatible = "arm,armv8-timer";
+		interrupts = <GIC_PPI 13 (GIC_CPU_MASK_SIMPLE(4) |
+			      IRQ_TYPE_LEVEL_LOW)>,
+			     <GIC_PPI 14 (GIC_CPU_MASK_SIMPLE(4) |
+			      IRQ_TYPE_LEVEL_LOW)>,
+			     <GIC_PPI 11 (GIC_CPU_MASK_SIMPLE(4) |
+			      IRQ_TYPE_LEVEL_LOW)>,
+			     <GIC_PPI 10 (GIC_CPU_MASK_SIMPLE(4) |
+			      IRQ_TYPE_LEVEL_LOW)>;
+	};
+
+	/*
+	 * Fixed-clock placeholders. The 4.4 BSP device tree declared exactly
+	 * these three frequencies and fed the PL011s from clk_75m; keeping the
+	 * same shape lets the console come up before the CRG driver is ported.
+	 */
+	clocks {
+		xtal_clk: xtal-clk {
+			compatible = "fixed-clock";
+			#clock-cells = <0>;
+			clock-frequency = <24000000>;
+			clock-output-names = "clk24M";
+		};
+
+		clk_54m: clk54m {
+			compatible = "fixed-clock";
+			#clock-cells = <0>;
+			clock-frequency = <54000000>;
+			clock-output-names = "clk54M";
+		};
+
+		clk_75m: clk75m {
+			compatible = "fixed-clock";
+			#clock-cells = <0>;
+			clock-frequency = <75000000>;
+			clock-output-names = "clk75M";
+		};
+	};
+
+	soc: soc@f0000000 {
+		compatible = "simple-bus";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges = <0x0 0x0 0xf0000000 0x10000000>;
+		dma-ranges = <0x0 0x0 0x0 0x40000000>;
+
+		/*
+		 * PL011s. The 4.4 BSP fed these through a single "apb_pclk"
+		 * clock; mainline pl011 wants both "uartclk" and "apb_pclk", so
+		 * both are wired to clk_75m.
+		 */
+		uart0: serial@8b00000 {
+			compatible = "arm,pl011", "arm,primecell";
+			reg = <0x8b00000 0x1000>;
+			interrupts = <GIC_SPI 49 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_75m>, <&clk_75m>;
+			clock-names = "uartclk", "apb_pclk";
+			status = "disabled";
+		};
+
+		uart2: serial@8b02000 {
+			compatible = "arm,pl011", "arm,primecell";
+			reg = <0x8b02000 0x1000>;
+			interrupts = <GIC_SPI 51 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_75m>, <&clk_75m>;
+			clock-names = "uartclk", "apb_pclk";
+			status = "disabled";
+		};
+
+		uart3: serial@8b03000 {
+			compatible = "arm,pl011", "arm,primecell";
+			reg = <0x8b03000 0x1000>;
+			interrupts = <GIC_SPI 52 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_75m>, <&clk_75m>;
+			clock-names = "uartclk", "apb_pclk";
+			status = "disabled";
+		};
+	};
+};

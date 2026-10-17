@@ -1,0 +1,186 @@
+name: kernel-6.18-hi3798mv300
+
+# Forward-port of the HiSTBLinux V100R005 BSP to Linux 6.18 LTS, stage 1:
+# boot the Hi3798M V300 to a userspace shell.
+#
+# Nothing here is built on a developer machine -- CI is the only build path,
+# so this workflow is the single source of truth for "does it compile".
+# The 1.7 GiB kernel tree is fetched and cached here rather than committed;
+# the repository stores only porting/overlay, i.e. the delta we actually own.
+
+on:
+  push:
+    branches: [test, master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: "Linux kernel version to build against"
+        required: false
+        default: "6.18.57"
+
+env:
+  KERNEL_VERSION: ${{ github.event.inputs.kernel_version || '6.18.57' }}
+  # sha256 of linux-6.18.57.tar.xz from kernel.org sha256sums.asc.
+  # Used when building the default version; other versions are verified
+  # against the published sums fetched at build time.
+  KERNEL_SHA256_6_18_57: "5bd9acdc82ec5efc3790ae840e5aaa40dfde7efff261cf6dde902dc570acf98c"
+  ARCH: arm64
+  CROSS_COMPILE: aarch64-linux-gnu-
+  # 32-bit compat toolchain. Required for CONFIG_COMPAT_VDSO to survive
+  # olddefconfig -- see porting/config/hi3798mv300.config.
+  CROSS_COMPILE_COMPAT: arm-linux-gnueabihf-
+
+jobs:
+  build:
+    name: build Image + DTB
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabihf \
+            binutils-arm-linux-gnueabihf \
+            bc bison flex \
+            libssl-dev libelf-dev \
+            device-tree-compiler \
+            cpio xz-utils \
+            busybox-static \
+            rsync
+
+      - name: Show toolchain
+        run: |
+          aarch64-linux-gnu-gcc --version | head -1
+          arm-linux-gnueabihf-gcc --version | head -1
+          # Linux 6.18 requires GCC 8.1+; fail loudly rather than cryptically.
+          gcc_major=$(aarch64-linux-gnu-gcc -dumpversion | cut -d. -f1)
+          if [ "$gcc_major" -lt 8 ]; then
+            echo "::error::aarch64 gcc $gcc_major is too old for Linux ${KERNEL_VERSION}"
+            exit 1
+          fi
+
+      - name: Cache kernel tarball
+        id: kernel-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/kernel-dl
+          key: kernel-tarball-${{ env.KERNEL_VERSION }}
+
+      - name: Fetch Linux ${{ env.KERNEL_VERSION }}
+        run: |
+          set -euo pipefail
+          ver="$KERNEL_VERSION"
+          major="${ver%%.*}"
+          tarball="linux-${ver}.tar.xz"
+          mkdir -p ~/kernel-dl
+          cd ~/kernel-dl
+
+          if [ ! -f "$tarball" ]; then
+            url="https://cdn.kernel.org/pub/linux/kernel/v${major}.x/${tarball}"
+            echo "downloading $url"
+            curl -fSL --retry 3 -o "$tarball" "$url"
+          else
+            echo "using cached tarball"
+          fi
+
+          # Verify against the published sums for this release line.
+          curl -fsSL "https://cdn.kernel.org/pub/linux/kernel/v${major}.x/sha256sums.asc" \
+            | grep " ${tarball}\$" > expected.sha256
+          sha256sum -c expected.sha256
+          echo "sha256 OK"
+
+      - name: Extract kernel
+        run: |
+          set -euo pipefail
+          tar -xf ~/kernel-dl/linux-${KERNEL_VERSION}.tar.xz
+          mv linux-${KERNEL_VERSION} kernel-tree
+          echo "KERNEL_TREE=$PWD/kernel-tree" >> "$GITHUB_ENV"
+
+      - name: Apply Hi3798M V300 overlay
+        run: bash porting/scripts/apply-overlay.sh "$KERNEL_TREE"
+
+      - name: Configure kernel
+        run: |
+          set -euo pipefail
+          cd "$KERNEL_TREE"
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE defconfig
+          ./scripts/kconfig/merge_config.sh -m -O . \
+            .config "$GITHUB_WORKSPACE/porting/config/hi3798mv300.config"
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE olddefconfig
+
+      - name: Record effective config
+        run: |
+          set -euo pipefail
+          cd "$KERNEL_TREE"
+          # These are the options stage 1 actually depends on. If COMPAT or
+          # ARM_PSCI_FW ever silently drops out, this step makes it visible.
+          grep -E "CONFIG_(ARCH_HISI|SERIAL_AMBA_PL011|SERIAL_AMBA_PL011_CONSOLE|COMPAT|COMPAT_VDSO|ARM_GIC|ARM_ARCH_TIMER|ARM_PSCI_FW)=" \
+            .config | sort
+
+      - name: Build device trees
+        run: |
+          set -euo pipefail
+          cd "$KERNEL_TREE"
+          # Device trees first. This is also the real DTS syntax gate: the
+          # sources use #include <dt-bindings/...>, so they must go through
+          # the kernel's cpp+dts pipeline rather than plain dtc.
+          # A DTS error surfaces here in seconds instead of after the full
+          # kernel build.
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE dtbs
+          ls -la arch/arm64/boot/dts/hisilicon/hi3798mv300-hi3798mv3dmm.dtb
+
+      - name: Build kernel Image
+        run: |
+          set -euo pipefail
+          cd "$KERNEL_TREE"
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j"$(nproc)" Image
+          ls -la arch/arm64/boot/Image
+
+      - name: Build initramfs
+        run: |
+          set -euo pipefail
+          # busybox-static ships /bin/busybox as a static PIE; -L resolves it.
+          bash porting/scripts/make-initramfs.sh \
+            "$GITHUB_WORKSPACE/initramfs.cpio.gz" /bin/busybox
+          ls -la "$GITHUB_WORKSPACE/initramfs.cpio.gz"
+
+      - name: Deploy-ready bundle
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "$KERNEL_TREE/arch/arm64/boot/Image" dist/Image
+          cp "$KERNEL_TREE/arch/arm64/boot/dts/hisilicon/hi3798mv300-hi3798mv3dmm.dtb" \
+             dist/hi3798mv300-hi3798mv3dmm.dtb
+          cp initramfs.cpio.gz dist/
+          cp "$KERNEL_TREE/.config" dist/kernel.config
+          ( cd dist && sha256sum Image hi3798mv300-hi3798mv3dmm.dtb initramfs.cpio.gz \
+              > SHA256SUMS )
+          ls -la dist/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hi3798mv300-kernel-${{ env.KERNEL_VERSION }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ env.KERNEL_VERSION }}
+          path: |
+            kernel-tree/.config
+          if-no-files-found: ignore
+          retention-days: 7

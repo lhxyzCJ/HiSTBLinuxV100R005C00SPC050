@@ -20,3 +20,13 @@ source/kernel/linux-4.4.y/.config
 
 # large rootfs images (>100MB, GitHub rejects) - keep local only
 *.ext4
+
+# Linux 6.18 LTS tree for the ARM64 forward-port.
+# It is ~1.7 GiB extracted, so it is never committed: the CI workflow
+# downloads and verifies the tarball from kernel.org and applies
+# porting/overlay/ on top. Keep it locally only as a reading reference.
+source/kernel/linux-6.18.y/
+
+# porting scratch / build outputs
+porting/__pycache__/
+porting/*.err
