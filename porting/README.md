@@ -18,7 +18,8 @@ Honest accounting of what has and has not been proven.
 | **Kernel compiles** (CI run 38997330115, 22m34s, all steps green) | ✅ **done** |
 | **`Image` is a valid arm64 boot image** (magic `ARMd`, 47.4 MiB) | ✅ verified |
 | **Device tree built and carries the right bindings** | ✅ verified |
-| **initramfs built** (1.06 MiB static busybox) | ✅ verified |
+| **initramfs built, with a target-architecture busybox** | ✅ verified *after a fix — see below* |
+| **Board can enter the kernel this produces** | ❌ **no — boot chain not delivered** |
 | **Boots on hardware** | ❌ not yet |
 
 Build artifacts of the verified run:
@@ -26,11 +27,23 @@ Build artifacts of the verified run:
 | Artifact | Size | Check |
 |---|---|---|
 | `Image` | 47.4 MiB | header magic `0x644d5241` (`ARMd`); `image_size` 48.2 MiB, the delta being BSS |
-| `hi3798mv300-hi3798mv3dmm.dtb` | 3.3 KiB | `compatible = "hisilicon,hi3798mv300"`; `serial@{8b00000,8b02000,8b03000}` bound to `arm,pl011` |
-| `initramfs.cpio.gz` | 1.06 MiB | static busybox |
+| `hi3798mv300-hi3798mv3dmm.dtb` | 3.3 KiB | `compatible` contains `hisilicon,hi3798mv300`; `serial@{8b00000,8b02000,8b03000}` bound to `arm,pl011`; uart0 `okay` |
+| `initramfs.cpio.gz` | 1.06 MiB | static **aarch64** busybox |
 | `kernel.config` | — | `Linux/arm64 6.18.57` |
 
-All three binaries pass `sha256sum -c SHA256SUMS`.
+> **Correction: the first two runs shipped a broken initramfs, and this table
+> called it verified.** CI packed the *runner's* x86-64 `/bin/busybox` into an
+> arm64 initramfs. The arm64 kernel cannot exec it (`ENOEXEC`), every init
+> path fails, and the boot dies with "No working init found" — while the
+> pipeline stayed green across two runs. The only check in place verified
+> *static linking*, never *architecture*.
+>
+> This is the failure mode the audit was aimed at, and it is the reason
+> `make-initramfs.sh` now asserts the ELF machine, CI cross-builds busybox
+> with `aarch64-linux-gnu-gcc` instead of trusting a host binary, and a
+> "Verify artifact contents" step inspects what is actually inside the
+> archive. Everything below marked "verified" is verified *by that check*,
+> not by a file existing.
 
 The build is deterministic where it matters. A second run (38998979429) was
 made after removing a dead `CONFIG_ARM_GIC_V3=n` line to confirm it changed
@@ -52,11 +65,14 @@ runs — the kernel embeds a build date and cpio records file times. Compare
 > to a 64-bit kernel, whether PSCI is actually implemented, or whether the
 > memory map is right. See Risks — those are all hardware questions.
 >
-> Two configuration traps were found and fixed while getting this green, both
-> of which fail *silently* rather than loudly:
+> Three configuration traps were found while getting this green. All three
+> fail *silently* rather than loudly, which is why each now has an explicit
+> assertion rather than a comment:
 > - `CONFIG_PSCI_FW` does not exist; the symbol is `ARM_PSCI_FW`.
 > - `CONFIG_COMPAT_VDSO` additionally requires `CROSS_COMPILE_COMPAT` to point
 >   at a 32-bit ARM toolchain, so CI installs `gcc-arm-linux-gnueabihf`.
+> - `CONFIG_VT=n` was silently discarded: `VT` is promptless while `EXPERT` is
+>   off, so Kconfig ignores the value and the shipped kernel has `VT=y`.
 >
 > Note also that `ARM_GIC`, `ARM_GIC_V3`, `ARM_GIC_V5` and `ARM_PSCI_FW` are
 > unconditionally `select`ed by `config ARM64` and cannot be disabled from a
@@ -71,12 +87,21 @@ boot path is **standard ARM IP with mainline drivers already present**:
 |---|---|---|
 | Debug console | `arm,pl011` | `SERIAL_AMBA_PL011` ✅ |
 | Interrupt controller | `arm,cortex-a9-gic` | `arm,gic-400` (GICv2) ✅ |
-| Timers | `arm,armv7-timer` | `arm,armv8-timer` ✅ |
 | GPIO | `arm,pl061` | `GPIO_PL061` ✅ |
 | Watchdog | `arm,sp805-wdt` | `ARM_SP805_WATCHDOG` ✅ |
 | SPI | `arm,pl022` | `SPI_PL022` ✅ |
 | USB | `generic-{ehci,ohci,xhci}` | mainline ✅ |
 | SATA | `generic-ahci` | `AHCI_PLATFORM` ✅ |
+
+**The system timer is the exception, and an earlier revision of this file got
+it wrong.** The BSP's `arm,armv7-timer` node is `#if 0`'d out
+(`hi3798mv300.dts:416-425`) and the shipped kernel runs a vendor timer instead
+(`CONFIG_TIMER_HISP804=y`, `timer@hisp804` at `0xf8a29000`; defconfig:951).
+There is **no mainline hisp804 driver**, so the architected timer is this
+port's only clocksource and it has no fallback. It should work — a Cortex-A53
+always integrates the generic timer, cv200 uses the byte-identical node, and
+firmware programs `CNTFRQ` to 24 MHz — but that is a hardware checkpoint, not
+a verified fact. Do not add `clock-frequency`: `CNTFRQ` is authoritative.
 
 More importantly, the **MV300 and the mainline-supported CV200 sibling share
 register layouts**, verified by diffing the two device trees:
@@ -84,11 +109,24 @@ register layouts**, verified by diffing the two device trees:
 | Block | BSP `hi3798mv300.dts` | mainline `hi3798cv200.dtsi` | Match |
 |---|---|---|---|
 | GIC distributor | `0xf1001000` | `0xf1001000` | identical |
-| CRG (clock/reset) | `0xf8a22000` | `0xf8a22000` | identical |
-| PERICTRL | `0xf8a20000` | `0xf8a20000` | identical |
+| GIC CPU interface | `0xf1002000` | `0xf1002000` | identical |
+| CRG (clock/reset) | `0xf8a22000` | `0xf8a22000` | identical, **but not implemented here** |
+| PERICTRL | `0xf8a20000` | `0xf8a20000` | identical, **but not implemented here** |
 | UART0 | `0xf8b00000`, SPI 49 | `0xf8b00000`, SPI 49 | identical |
 | UART2 | `0xf8b02000`, SPI 51 | `0xf8b02000`, SPI 51 | identical |
-| UART3 | `0xf8b03000`, SPI 52 | — | — |
+| UART3 | `0xf8b03000`, SPI 52 | *cv200 has no uart3* | BSP-only |
+
+Two caveats an earlier revision of this file glossed over. The CRG and
+PERICTRL rows describe hardware that genuinely matches, but stage 1 does not
+instantiate either node — it uses fixed-clock placeholders — so they are not
+part of the delivered port. And `uart3` has no cv200 counterpart, so its
+provenance is the BSP alone, not a cross-check.
+
+Also unverified: the GICH/GICV windows (`0xf1004000`/`0xf1006000`) are copied
+from cv200 as ARM's standard GIC-400 layout. No BSP or ATF source attests them
+for this SoC. Impact is nil on this boot flow — `irq-gic.c` maps only regions
+0/1, and regions 2/3 are read solely by the KVM vGIC, which needs HYP mode
+while this loader enters EL1.
 
 That is what makes this a port rather than a from-scratch bring-up: the
 `hi3798cv200.dtsi` and `crg-hi3798cv200.c` already in mainline are usable
@@ -208,25 +246,50 @@ each) → `demux`/`vi`/`adsp` → `vdec`/`venc` → `vo`/`vpss`/`hdmi` → `vfmw
 
 Ranked by how likely they are to invalidate the approach, not by effort.
 
-1. **Firmware may not boot an arm64 image.** This is the big one, and it
-   cannot be settled without the board. The mv300 board configuration is
-   32-bit (`CFG_HI_32BIT_SYSTEM=y`, `CFG_ARM_HISTBV320_LINUX=y`,
-   `CFG_HI_LOADER_SUPPORT` unset). Switching the kernel to arm64 requires the
-   boot chain — HiSilicon bootloader and, if present, ARM Trusted Firmware —
-   to load and enter a 64-bit kernel. If it only ever enters AArch32, this
-   port needs a matching 64-bit bootloader first. **Verify with the existing
-   bootloader before investing in stage 2.**
-2. **PSCI is assumed, not confirmed.** The BSP device tree declares
-   `arm,psci-0.2`, but the 4.4 kernel did not use it — `mach-hi3798mv2x`
-   carried custom `smp_ops`. arm64 has no such fallback: SMP requires working
-   PSCI. If the firmware lacks it, the board may boot single-core only.
-3. **The memory node is a first guess.** `reg = <0x0 0x0 0x0 0x40000000>`
-   assumes a flat 1 GiB from 0. The BSP reserves windows for MMZ, TEE and the
-   bootloader; those may need `reserved-memory` nodes. Symptoms would be
-   random corruption rather than a clean failure.
-4. **Cache geometry in the DT is informational.** The L2 `cache-size` in
-   `hi3798mv300.dtsi` mirrors the CV200 4×A53 cluster and is only a hint; the
-   kernel reads the real values from CLIDR/CCSIDR. Not a functional risk.
-5. **`CONFIG_COMPAT` is load-bearing** for the "userspace keeps working"
-   claim above. If the stage-1 config loses it, 32-bit userspace stops
-   running — worth pinning in review.
+1. **The boot chain is not delivered, and without it the artifacts cannot be
+   entered at all.** This is no longer a "might not work" risk — it is a known
+   gap. This board's loader only reaches AArch64 through a FIP:
+   `source/boot/fastboot/common/load_fip.c:230-320` requires BL31 plus a BL33
+   that is a *legacy uImage with the DTB appended*, memmoves BL31 to
+   `0x4400000`, sets `AARCH_MODE`, and enters BL33 at EL1. CI produces a bare
+   `Image` and a standalone `.dtb`, which that loader has no way to start.
+   Worse, `CFG_HI_CHIP_TYPE=hi3798mv300` is passed to ATF as `PLAT`, and the
+   ATF tree contains only `hi3796mv200`, `hi3798cv200` and `hi3798mv200` —
+   so **no BL31 can currently be built for that name**.
+   Fix: build BL31 from the `hi3798mv200` plat, package BL33 as a uImage with
+   the DTB appended, ship `fip.bin`. Only then is the DT's PSCI block
+   meaningful.
+2. **PSCI is asserted, not confirmed — and the BSP never used it.** The 4.4
+   kernel had `# CONFIG_ARM_PSCI is not set` (defconfig:454) and did SMP by
+   poking SCU/reset registers from 32-bit code (`mach-hi3798mv2x/platsmp.c`).
+   arm64 has no such fallback. The DT's `arm,psci-0.2` node is correct *on a
+   BL31 boot* and actively harmful without one: `psci_dt_init()` runs whenever
+   the node exists, issues `PSCI_VERSION` by SMC, and if that fails
+   `cpu_psci_cpu_prepare()` silently refuses CPUs 1-3. Expect a single-core
+   boot with no obvious error rather than a clean failure.
+3. **The MMZ carve-out is unmodelled.** The vendor loader for this exact board
+   reserves 380 MiB of the 1 GiB
+   (`source/boot/fastboot/include/configs/hi3798mv2x.h:137`,
+   `mem=1G mmz=ddr,0,0,380M`), and on a FIP boot `mem=`/`mmz=` never reach the
+   kernel, so the DT memory node is the sole authority. Stage 1 is unaffected
+   (initramfs, no MMZ). Any later media driver allocating from that fixed
+   range would DMA over live page-allocator memory — silent corruption, not a
+   clean failure. The base must be derived from `source/common/drv/mmz`, not
+   guessed.
+4. **The architected timer is the only clocksource and has no fallback.** The
+   BSP declined to use it (`#if 0`, vendor `hisp804` instead) and no mainline
+   `hisp804` driver exists. A53 always integrates the generic timer and
+   firmware programs `CNTFRQ`, so this should work — but it is a hardware
+   checkpoint. The boot log line to look for is
+   `cp15 timer(s) running at 24.00MHz`.
+5. **Nothing in this port has ever executed.** Every "verified" claim above is
+   a claim about *building*, not running.
+6. **The vendor media stack — the actual product functionality — is entirely
+   unported**, and per `api-drift-report.md` is the larger half of the work.
+7. **Cache geometry in the DT is informational.** The L2 `cache-size` mirrors
+   the CV200 4×A53 cluster; on arm64 the DT wins for sysfs only, and the
+   kernel's real geometry comes from CLIDR/CCSIDR. Not a functional risk.
+8. **`CONFIG_COMPAT` is load-bearing** for the "userspace keeps working" claim,
+   and it is conditional (`depends on ARM64_4K_PAGES || EXPERT`). The fragment
+   now pins `ARM64_4K_PAGES` so a future page-size line cannot silently drop
+   the entire AArch32 userspace.

@@ -30,3 +30,13 @@ source/kernel/linux-6.18.y/
 # porting scratch / build outputs
 porting/__pycache__/
 porting/*.err
+
+# Directory the CI workflow extracts the kernel into. Not used locally by
+# design (compilation is CI-only), but a manual dry-run of the workflow would
+# otherwise leave 1.7 GiB untracked-but-unignored in the repo root.
+kernel-tree/
+
+# busybox built for the initramfs
+busybox-aarch64
+busybox.tar.bz2
+initramfs.cpio.gz

@@ -14,7 +14,14 @@
 
 / {
 	model = "Hisilicon Hi3798M V300 (hi3798mv3dmm)";
-	compatible = "hisilicon,hi3798mv300";
+	/*
+	 * Board string first, then the SoC, per the usual "board, SoC"
+	 * convention. Note that as of 6.18.57 neither string is listed in
+	 * Documentation/devicetree/bindings/arm/hisilicon/hisilicon.yaml --
+	 * that file knows only hi3798cv200(-poplar) for this family. A binding
+	 * patch has to travel with the overlay for dtbs_check to be clean.
+	 */
+	compatible = "hisilicon,hi3798mv3dmm", "hisilicon,hi3798mv300";
 
 	aliases {
 		serial0 = &uart0;
@@ -32,6 +39,28 @@
 		bootargs = "console=ttyAMA0,115200 earlycon=pl011,0xf8b00000";
 	};
 
+	/*
+	 * Memory.
+	 *
+	 * KNOWN GAP, deliberately not papered over: the vendor loader for this
+	 * exact board reserves a slice of the 1 GiB for MMZ -- see
+	 * source/boot/fastboot/include/configs/hi3798mv2x.h:137,
+	 * CONFIG_BOOTARGS_1G = "mem=1G mmz=ddr,0,0,380M". No reserved-memory
+	 * node models that here, so the kernel is told it owns all 1 GiB.
+	 *
+	 * That is fine for stage 1, which uses no MMZ and boots from an
+	 * initramfs. It is NOT fine once any media driver allocates from the
+	 * fixed MMZ range: it would DMA over pages the kernel believes it owns,
+	 * producing silent corruption rather than a clean failure.
+	 *
+	 * On a BL31/FIP boot the loader does not fix up /chosen and arm64
+	 * ignores ATAGs, so mem=/mmz= never reach the kernel -- this node is
+	 * the sole authority, and the carve-out must be modelled here.
+	 *
+	 * Do not guess the base: derive it from the vendor zone-creation path
+	 * (source/common/drv/mmz). The third field of mmz=ddr,0,0,380M is 0
+	 * ("auto"), so only the 768M/1.5G board variants pin an explicit base.
+	 */
 	memory@0 {
 		device_type = "memory";
 		reg = <0x0 0x0 0x0 0x40000000>;	/* 1 GiB */

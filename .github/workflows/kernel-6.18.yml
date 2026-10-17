@@ -34,9 +34,17 @@ env:
   KERNEL_VERSION: ${{ github.event.inputs.kernel_version || '6.18.57' }}
   ARCH: arm64
   CROSS_COMPILE: aarch64-linux-gnu-
-  # 32-bit compat toolchain. Required for CONFIG_COMPAT_VDSO to survive
-  # olddefconfig -- see porting/config/hi3798mv300.config.
+  # 32-bit compat toolchain. CONFIG_COMPAT_VDSO's Kconfig dependency is the
+  # string test "$(CROSS_COMPILE_COMPAT)" != "" (arch/arm64/Kconfig:1828), so
+  # exporting this variable is what lets the option stay on -- the fragment
+  # line alone does not do it, and a bogus non-empty value would satisfy
+  # Kconfig and only fail later in the build.
   CROSS_COMPILE_COMPAT: arm-linux-gnueabihf-
+  # Make Kconfig report symbols in the fragment that do not exist, rather than
+  # dropping them in silence. This is the class of the CONFIG_PSCI_FW typo that
+  # shipped once already. Note this alone only warns; the actual gate is the
+  # "Verify config fragment survived" step.
+  KCONFIG_WARN_UNKNOWN_SYMBOLS: "1"
 
 jobs:
   build:
@@ -121,18 +129,74 @@ jobs:
           set -euo pipefail
           cd "$KERNEL_TREE"
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE defconfig
+          # -O . is load-bearing, not cosmetic. merge_config.sh derives its
+          # output path from it (see its OUTPUT/KCONFIG_CONFIG handling); with
+          # `-O build` it would write build/.config, and the plain `make
+          # olddefconfig` below -- which has no O= -- would re-read the
+          # unmerged ./.config and silently discard this entire fragment.
           ./scripts/kconfig/merge_config.sh -m -O . \
             .config "$GITHUB_WORKSPACE/porting/config/hi3798mv300.config"
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE olddefconfig
 
-      - name: Record effective config
+      - name: Verify config fragment survived
         run: |
           set -euo pipefail
           cd "$KERNEL_TREE"
-          # These are the options stage 1 actually depends on. If COMPAT or
-          # ARM_PSCI_FW ever silently drops out, this step makes it visible.
-          grep -E "CONFIG_(ARCH_HISI|SERIAL_AMBA_PL011|SERIAL_AMBA_PL011_CONSOLE|COMPAT|COMPAT_VDSO|ARM_GIC|ARM_ARCH_TIMER|ARM_PSCI_FW)=" \
-            .config | sort
+
+          # Why this asserts instead of printing.
+          #
+          # This step used to grep the interesting symbols and display them.
+          # That could never catch the failure it existed for: Kconfig rewrites
+          # a dropped symbol as "# CONFIG_X is not set", which contains no "=",
+          # so a dropped symbol printed nothing at all -- and the step exited 0
+          # because the other alternatives still matched. An earlier revision
+          # shipped CONFIG_VT=n under a "keep the image small" comment; the
+          # real .config had CONFIG_VT=y and nobody noticed.
+          #
+          # Two holes make this assertion the only closure:
+          #   - `merge_config.sh -m` exits before its own "Value requested for
+          #     X not in final .config" loop, so it never checks the outcome.
+          #   - `olddefconfig` then silently restores Kconfig defaults for any
+          #     symbol it could not honour.
+          #
+          # The list of symbols to check is DERIVED from the fragment, not
+          # hand-maintained. PART 1 of the fragment (every CONFIG_*=y line
+          # before the "PART 2" banner) is read straight out of the file, so
+          # adding a line there automatically adds it here -- a "keep these in
+          # sync" comment would rot, and the failure mode of a stale list is
+          # precisely the silent drop this step exists to prevent.
+          fragment="$GITHUB_WORKSPACE/porting/config/hi3798mv300.config"
+          from_fragment=$(awk '
+            /PART 2 -- documentation only/ { exit }
+            /^CONFIG_[A-Z0-9_]+=y$/ { sub(/^CONFIG_/, ""); sub(/=y$/, ""); print }
+          ' "$fragment")
+
+          if [ -z "$from_fragment" ]; then
+            echo "::error::could not parse PART 1 out of $fragment -- banner changed?"
+            exit 1
+          fi
+
+          # PART 2 symbols are promptless, so the fragment cannot set them and
+          # they are asserted separately. They are still load-bearing for stage
+          # 1, so a change in an upstream default or in what `config ARM64`
+          # selects should fail here rather than surprise us at boot.
+          promptless="ARM64 SMP ARM_GIC ARM_ARCH_TIMER ARM_PSCI_FW
+                      PROC_FS SYSFS TTY SERIAL_EARLYCON"
+
+          required="$from_fragment $promptless"
+
+          fail=0
+          for s in $required; do
+            if ! grep -qE "^CONFIG_${s}=y$" .config; then
+              echo "::error::CONFIG_${s} is not =y in the final .config"
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] || exit 1
+
+          n=$(echo $required | wc -w)
+          echo "All $n required symbols present as =y"
+          for s in $required; do grep -E "^CONFIG_${s}=y$" .config; done | sort
 
       - name: Build device trees
         run: |
@@ -143,22 +207,59 @@ jobs:
           # the kernel's cpp+dts pipeline rather than plain dtc.
           # A DTS error surfaces here in seconds instead of after the full
           # kernel build.
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE dtbs
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE dtbs \
+            2>&1 | tee -a "$GITHUB_WORKSPACE/build.log"
           ls -la arch/arm64/boot/dts/hisilicon/hi3798mv300-hi3798mv3dmm.dtb
 
       - name: Build kernel Image
         run: |
           set -euo pipefail
           cd "$KERNEL_TREE"
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j"$(nproc)" Image
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j"$(nproc)" Image \
+            2>&1 | tee -a "$GITHUB_WORKSPACE/build.log"
           ls -la arch/arm64/boot/Image
+
+      - name: Build aarch64 busybox for the initramfs
+        run: |
+          set -euo pipefail
+          # The initramfs must contain TARGET binaries. An earlier revision
+          # passed the runner's /bin/busybox -- an x86-64 binary -- into an
+          # arm64 image, so /init could never exec and the boot would panic
+          # with "No working init found" while CI stayed green. Cross-build it
+          # with the same toolchain as the kernel instead of trusting a host
+          # binary, and let make-initramfs.sh assert the result.
+          ver=1.36.1
+          url="https://busybox.net/downloads/busybox-${ver}.tar.bz2"
+          curl -fSL --retry 3 -o busybox.tar.bz2 "$url"
+          # Published alongside the tarball at
+          # https://busybox.net/downloads/busybox-1.36.1.tar.bz2.sha256
+          # This catches a truncated or substituted download. It is NOT a
+          # supply-chain guarantee: the digest and the tarball come from the
+          # same origin over the same TLS connection, and there is no GPG
+          # signature check. Same caveat applies to the kernel tarball below.
+          echo "b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314  busybox.tar.bz2" \
+            | sha256sum -c -
+          tar -xf busybox.tar.bz2
+          cd "busybox-${ver}"
+          make ARCH=arm64 CROSS_COMPILE=$CROSS_COMPILE defconfig >/dev/null
+          # Static, so the initramfs needs no libc.
+          sed -i 's/^# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
+          grep -q '^CONFIG_STATIC=y' .config || {
+            echo "::error::could not enable CONFIG_STATIC in busybox"; exit 1; }
+          make ARCH=arm64 CROSS_COMPILE=$CROSS_COMPILE olddefconfig >/dev/null
+          make ARCH=arm64 CROSS_COMPILE=$CROSS_COMPILE -j"$(nproc)" >/dev/null
+          file busybox
+          # Fail here rather than at boot.
+          ${CROSS_COMPILE}readelf -h busybox | grep -q AArch64 || {
+            echo "::error::busybox is not AArch64"; exit 1; }
+          cp busybox "$GITHUB_WORKSPACE/busybox-aarch64"
 
       - name: Build initramfs
         run: |
           set -euo pipefail
-          # busybox-static ships /bin/busybox as a static PIE; -L resolves it.
           bash porting/scripts/make-initramfs.sh \
-            "$GITHUB_WORKSPACE/initramfs.cpio.gz" /bin/busybox
+            "$GITHUB_WORKSPACE/initramfs.cpio.gz" \
+            "$GITHUB_WORKSPACE/busybox-aarch64"
           ls -la "$GITHUB_WORKSPACE/initramfs.cpio.gz"
 
       - name: Deploy-ready bundle
@@ -170,9 +271,66 @@ jobs:
              dist/hi3798mv300-hi3798mv3dmm.dtb
           cp initramfs.cpio.gz dist/
           cp "$KERNEL_TREE/.config" dist/kernel.config
-          ( cd dist && sha256sum Image hi3798mv300-hi3798mv3dmm.dtb initramfs.cpio.gz \
-              > SHA256SUMS )
+          cp busybox-aarch64 dist/busybox-aarch64
+          # Hash everything that is uploaded. The list used to cover only three
+          # of five files, so kernel.config could change unnoticed even though
+          # it is the artifact the reproducibility comparison relies on.
+          ( cd dist && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' \
+              | sort | xargs sha256sum > SHA256SUMS )
           ls -la dist/
+          cat dist/SHA256SUMS
+
+      - name: Verify artifact contents
+        run: |
+          set -euo pipefail
+          # Everything before this point only proved the files EXIST. `ls -la`
+          # and if-no-files-found cannot tell a 0-byte DTB from a good one, and
+          # none of them look inside. This step is what makes "green" mean
+          # something: it is the check that would have caught the x86-64
+          # busybox whose absence from the pipeline let a broken initramfs ship.
+          cd dist
+
+          echo "--- Image ---"
+          # arm64 boot header: magic 'ARMd' at offset 56.
+          magic=$(od -An -tx1 -j56 -N4 Image | tr -d ' \n')
+          [ "$magic" = "41524d64" ] || { echo "::error::Image magic is $magic, expected 41524d64 (ARMd)"; exit 1; }
+          size=$(stat -c%s Image)
+          [ "$size" -gt 8000000 ] || { echo "::error::Image is only $size bytes"; exit 1; }
+          echo "  magic ARMd OK, $size bytes"
+
+          echo "--- Device tree ---"
+          dtc -I dtb -O dts -o /tmp/board.dts hi3798mv300-hi3798mv3dmm.dtb 2>/dev/null
+          grep -q 'hisilicon,hi3798mv300' /tmp/board.dts || { echo "::error::DTB compatible missing"; exit 1; }
+          grep -q 'hi3798mv3dmm'           /tmp/board.dts || { echo "::error::DTB model missing"; exit 1; }
+          grep -q 'arm,pl011'              /tmp/board.dts || { echo "::error::DTB has no PL011 console"; exit 1; }
+          grep -q 'console=ttyAMA0'        /tmp/board.dts || { echo "::error::DTB bootargs lost the console"; exit 1; }
+          grep -q 'memory@0'               /tmp/board.dts || { echo "::error::DTB has no memory node"; exit 1; }
+          # The dtsi leaves every UART disabled; the board file must enable one,
+          # or there is no console and therefore no shell.
+          awk '/serial@8b00000/,/};/' /tmp/board.dts | grep -q 'status = "okay"' || {
+            echo "::error::uart0 is not enabled in the DTB -- no console"; exit 1; }
+          echo "  compatible, model, pl011, bootargs, memory, uart0 okay"
+
+          echo "--- busybox + initramfs ---"
+          ${CROSS_COMPILE}readelf -h busybox-aarch64 | grep -q AArch64 || {
+            echo "::error::busybox-aarch64 is not AArch64"; exit 1; }
+          # And the one that actually matters: what is INSIDE the initramfs.
+          rm -rf /tmp/ir && mkdir /tmp/ir
+          ( cd /tmp/ir && gzip -dc "$GITHUB_WORKSPACE/dist/initramfs.cpio.gz" | cpio -idm --quiet )
+          [ -x /tmp/ir/init ] || { echo "::error::initramfs has no executable /init"; exit 1; }
+          ${CROSS_COMPILE}readelf -h /tmp/ir/bin/busybox | grep -q AArch64 || {
+            echo "::error::initramfs busybox is not AArch64 -- this would panic at boot"; exit 1; }
+          echo "  initramfs /init present, busybox AArch64"
+
+          echo "--- config ---"
+          for s in ARCH_HISI SERIAL_AMBA_PL011 SERIAL_AMBA_PL011_CONSOLE COMPAT ARM_PSCI_FW; do
+            grep -qE "^CONFIG_${s}=y$" kernel.config || { echo "::error::kernel.config lost CONFIG_${s}"; exit 1; }
+          done
+          echo "  load-bearing symbols present"
+
+          echo "--- checksums ---"
+          sha256sum -c SHA256SUMS
+          echo "all artifact content checks passed"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -187,7 +345,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-logs-${{ env.KERNEL_VERSION }}
+          # This used to upload only kernel-tree/.config -- no log at all --
+          # and with if-no-files-found: ignore it was a silent no-op for any
+          # failure before "Extract kernel" (download, sha256, toolchain,
+          # cache). The build steps now tee into build.log, so this actually
+          # carries diagnostics.
           path: |
+            build.log
             kernel-tree/.config
-          if-no-files-found: ignore
+            kernel-tree/arch/arm64/boot/dts/hisilicon/Makefile
+          if-no-files-found: warn
           retention-days: 7

@@ -7,19 +7,47 @@
  *
  * The skeleton, node naming and mainline bindings follow
  * arch/arm64/boot/dts/hisilicon/hi3798cv200.dtsi, which is the mainline-
- * supported sibling of this SoC. Register windows below were taken from the
- * 4.4 BSP device tree, not guessed:
+ * supported sibling of this SoC. Provenance of the values actually present
+ * below, one by one:
  *
- *   GIC-400      0xf1001000   (identical to hi3798cv200)
- *   CRG          0xf8a22000   (identical to hi3798cv200 crg)
- *   PERICTRL     0xf8a20000   (identical to hi3798cv200 perictrl)
- *   UART0/2/3    0xf8b00000 / 0xf8b02000 / 0xf8b03000, SPI 49 / 51 / 52
- *                             (bit-identical to hi3798cv200)
+ *   GICD/GICC    0xf1001000 / 0xf1002000   BSP hi3798mv300.dts:103-104;
+ *                                          matches hi3798cv200.dtsi
+ *   GICH/GICV    0xf1004000 / 0xf1006000   NOT attested by any BSP or ATF
+ *                                          source. Copied from the cv200
+ *                                          sibling as ARM's standard GIC-400
+ *                                          layout. See the note on the gic
+ *                                          node -- harmless, but unverified.
+ *   UART0/2      0xf8b00000 / 0xf8b02000, SPI 49 / 51
+ *                                          BSP :443-444, :453-454; matches
+ *                                          hi3798cv200.dtsi
+ *   UART3        0xf8b03000, SPI 52        BSP :463-464. hi3798cv200 has NO
+ *                                          uart3, so this one is BSP-only.
+ *   clk 24/54/75 MHz                       BSP :107-128, corroborated by
+ *                                          ATF hisi_def.h:54-61
+ *
+ * NOT present in this file, despite the SoC having them: CRG (0xf8a22000),
+ * PERICTRL (0xf8a20000), sysctrl. Stage 1 uses fixed-clock placeholders
+ * instead, so nothing here claims those windows.
  *
  * Stage 1 scope: enough of the SoC to reach a userspace shell over the
- * PL011 debug UART with an initramfs. Clocks are modelled as fixed-clock
- * placeholders so that bring-up does not yet depend on the CRG driver;
- * see porting/README.md for the roadmap that replaces them.
+ * PL011 debug UART with an initramfs.
+ *
+ * NOTE on the timer: the BSP did NOT use the architected timer. Its
+ * arm,armv7-timer node is #if 0'd out (BSP hi3798mv300.dts:416-425) and the
+ * shipped kernel runs the vendor timer instead (CONFIG_TIMER_HISP804=y,
+ * timer@hisp804 at 0xf8a29000). There is no mainline hisp804 driver, so the
+ * architected timer below is this port's only clocksource and has no
+ * fallback. It should work -- a Cortex-A53 always integrates the generic
+ * timer, cv200 uses the identical node, and firmware programs CNTFRQ -- but
+ * it is a hardware checkpoint, not a verified fact. Do not add
+ * clock-frequency: CNTFRQ is authoritative.
+ *
+ * NOTE on PSCI: every CPU below says enable-method = "psci", and arm64 has no
+ * mach smp_ops fallback. That is only true on a BL31/FIP boot flow. The BSP
+ * itself never used PSCI (# CONFIG_ARM_PSCI is not set, defconfig:454) and did
+ * SMP by poking SCU/reset registers from 32-bit code. See porting/README.md --
+ * the boot chain is a known, unfixed gap, and a bare Image + standalone DTB
+ * (what CI produces) is not something this board's loader can enter at all.
  */
 
 #include <dt-bindings/interrupt-controller/arm-gic.h>
@@ -114,6 +142,17 @@
 		compatible = "arm,gic-400";
 		reg = <0x0 0xf1001000 0x0 0x1000>,  /* GICD */
 		      <0x0 0xf1002000 0x0 0x2000>,  /* GICC */
+		      /*
+		       * GICH/GICV: UNVERIFIED. No BSP or ATF source attests these
+		       * addresses; they are copied from the cv200 sibling as ARM's
+		       * standard GIC-400 layout, and +0x3000/+0x5000 from GICD is
+		       * the documented VE offset. Impact of being wrong is nil on
+		       * this boot flow: irq-gic.c maps only regions 0/1, and
+		       * regions 2/3 are read solely by the KVM vGIC, which needs
+		       * HYP mode -- this loader enters EL1. A 2-entry reg would be
+		       * equally legal (arm,gic.yaml minItems: 2) and is the safer
+		       * choice if these are ever suspected of causing trouble.
+		       */
 		      <0x0 0xf1004000 0x0 0x2000>,  /* GICH */
 		      <0x0 0xf1006000 0x0 0x2000>;  /* GICV */
 		interrupts = <GIC_PPI 9 (GIC_CPU_MASK_SIMPLE(4) |
@@ -173,10 +212,22 @@
 		/*
 		 * PL011s. The 4.4 BSP fed these through a single "apb_pclk"
 		 * clock; mainline pl011 wants both "uartclk" and "apb_pclk", so
-		 * both are wired to clk_75m.
+		 * both are wired to clk_75m. The driver takes the first clock by
+		 * name-NULL and the AMBA bus hard-requires one literally named
+		 * "apb_pclk", so both must be present.
+		 *
+		 * arm,primecell-periphid is carried over from the BSP (which set
+		 * 0x00241011, i.e. HiSilicon's JEP106 designer ID 0x241). It is
+		 * redundant if the silicon reports the same value -- amba_lookup
+		 * masks with 0x000fffff, which excludes the designer-ID nibble,
+		 * so the mainline table matches either way. It is kept as cheap
+		 * insurance: if the PID registers read something unexpected, the
+		 * console silently never appears, and a wrong explicit id is a
+		 * far cheaper failure to diagnose than a missing one.
 		 */
 		uart0: serial@8b00000 {
 			compatible = "arm,pl011", "arm,primecell";
+			arm,primecell-periphid = <0x00241011>;
 			reg = <0x8b00000 0x1000>;
 			interrupts = <GIC_SPI 49 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&clk_75m>, <&clk_75m>;
@@ -186,6 +237,7 @@
 
 		uart2: serial@8b02000 {
 			compatible = "arm,pl011", "arm,primecell";
+			arm,primecell-periphid = <0x00241011>;
 			reg = <0x8b02000 0x1000>;
 			interrupts = <GIC_SPI 51 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&clk_75m>, <&clk_75m>;
@@ -195,6 +247,7 @@
 
 		uart3: serial@8b03000 {
 			compatible = "arm,pl011", "arm,primecell";
+			arm,primecell-periphid = <0x00241011>;
 			reg = <0x8b03000 0x1000>;
 			interrupts = <GIC_SPI 52 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&clk_75m>, <&clk_75m>;
