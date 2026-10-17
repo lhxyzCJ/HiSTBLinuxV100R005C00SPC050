@@ -61,6 +61,14 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
+          # file is required, not optional: make-initramfs.sh and this workflow
+          # both call it, and the workflow's copy is UNGUARDED -- a missing
+          # `file` would abort the step with 127.
+          #
+          # busybox-static is deliberately NOT installed any more. It was how
+          # the x86-64 busybox got into an arm64 initramfs; the workflow now
+          # cross-builds busybox from source, and leaving a host busybox on
+          # PATH only invites the same mistake back.
           sudo apt-get install -y --no-install-recommends \
             gcc-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu \
@@ -70,8 +78,29 @@ jobs:
             libssl-dev libelf-dev \
             device-tree-compiler \
             cpio xz-utils \
-            busybox-static \
+            file \
             rsync
+
+      - name: Verify every tool this workflow relies on
+        run: |
+          set -euo pipefail
+          # The busybox step failed on a CI round-trip because a build-system
+          # assumption (make olddefconfig) was copied from the kernel and never
+          # executed. This step exists so the cheap class of that mistake --
+          # a tool or target that simply is not there -- fails in seconds with
+          # a clear message instead of 23 minutes in.
+          missing=0
+          for t in dtc cpio gzip file od stat awk sed grep sha256sum \
+                   readelf aarch64-linux-gnu-readelf aarch64-linux-gnu-gcc \
+                   arm-linux-gnueabihf-gcc bison flex bc rsync curl tar; do
+            if command -v "$t" >/dev/null 2>&1; then
+              printf '  ok   %s\n' "$t"
+            else
+              printf '::error::required tool missing: %s\n' "$t"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
 
       - name: Show toolchain
         run: |
@@ -246,8 +275,19 @@ jobs:
           sed -i 's/^# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
           grep -q '^CONFIG_STATIC=y' .config || {
             echo "::error::could not enable CONFIG_STATIC in busybox"; exit 1; }
-          make ARCH=arm64 CROSS_COMPILE=$CROSS_COMPILE olddefconfig >/dev/null
-          make ARCH=arm64 CROSS_COMPILE=$CROSS_COMPILE -j"$(nproc)" >/dev/null
+          # Do NOT run `make olddefconfig` here. BusyBox ships a stripped-down
+          # kconfig that has `oldconfig` but no `olddefconfig` target; an
+          # earlier revision copied the kernel idiom and died with
+          # "No rule to make target 'olddefconfig'". CONFIG_STATIC has no
+          # dependencies, so the sed above is sufficient and busybox reads
+          # .config directly.
+          #
+          # Output is deliberately NOT redirected: swallowing it is what made
+          # that failure take a full 23-minute CI cycle to diagnose.
+          make ARCH=arm64 CROSS_COMPILE=$CROSS_COMPILE -j"$(nproc)"
+          # A build that "succeeds" without producing the binary would sail
+          # straight into the next step.
+          [ -x busybox ] || { echo "::error::busybox was not produced"; exit 1; }
           file busybox
           # Fail here rather than at boot.
           ${CROSS_COMPILE}readelf -h busybox | grep -q AArch64 || {
