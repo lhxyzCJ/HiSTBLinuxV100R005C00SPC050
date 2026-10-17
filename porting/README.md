@@ -329,19 +329,38 @@ each) → `demux`/`vi`/`adsp` → `vdec`/`venc` → `vo`/`vpss`/`hdmi` → `vfmw
 
 Ranked by how likely they are to invalidate the approach, not by effort.
 
-1. **The boot chain is not delivered, and without it the artifacts cannot be
-   entered at all.** This is no longer a "might not work" risk — it is a known
-   gap. This board's loader only reaches AArch64 through a FIP:
-   `source/boot/fastboot/common/load_fip.c:230-320` requires BL31 plus a BL33
-   that is a *legacy uImage with the DTB appended*, memmoves BL31 to
-   `0x4400000`, sets `AARCH_MODE`, and enters BL33 at EL1. CI produces a bare
-   `Image` and a standalone `.dtb`, which that loader has no way to start.
-   Worse, `CFG_HI_CHIP_TYPE=hi3798mv300` is passed to ATF as `PLAT`, and the
-   ATF tree contains only `hi3796mv200`, `hi3798cv200` and `hi3798mv200` —
-   so **no BL31 can currently be built for that name**.
-   Fix: build BL31 from the `hi3798mv200` plat, package BL33 as a uImage with
-   the DTB appended, ship `fip.bin`. Only then is the DT's PSCI block
-   meaningful.
+1. **The boot chain is half delivered: BL33 is done, BL31 and the FIP are not.**
+   This board's loader only reaches AArch64 through a FIP
+   (`source/boot/fastboot/common/load_fip.c:230-320`), so until all of it
+   exists the artifacts still cannot be entered.
+
+   **BL33 — done, and verified.** `load_fip.c:249-266` takes the 64-bit path
+   only when the uImage claims `IH_ARCH_ARM64` *and* carries an FDT
+   immediately after its payload that passes `fdt_check_header`; otherwise it
+   silently falls back to `SPSR_MODE32` with no DTB and no PSCI. CI now builds
+   such a uImage (`porting/appends/arch/arm64/boot/Makefile.append`) and run
+   39025428175 produced one:
+
+   | Field | Value |
+   |---|---|
+   | `ih_magic` | `0x27051956` |
+   | `ih_arch` | `22` = `IH_ARCH_ARM64` |
+   | `ih_size` | 49 745 920 (47.44 MiB) |
+   | file | 49 749 438 = 64 + 49 745 920 + 3 454 (DTB) |
+   | FDT at offset 49 745 984 | `d00dfeed`, and `dtc` parses it to the hi3798mv300 tree |
+
+   **BL31 — not started.** `CFG_HI_CHIP_TYPE=hi3798mv300` is passed to ATF as
+   `PLAT`, but the ATF tree contains only `hi3796mv200`, `hi3798cv200` and
+   `hi3798mv200`, so **no BL31 can be built for that name**. The
+   `hi3798mv200` plat does implement PSCI (`hisi_pm.c`), so the fix is to
+   build with `PLAT=hi3798mv200`. Two further mismatches to expect: ATF emits
+   to `build/<PLAT>/`, while the SDK build expects
+   `build/$(CFG_HI_CHIP_TYPE)/`; and the SDK's `DISABLE_TEE`/`SPD=none`
+   plumbing has never been exercised against this plat.
+
+   **FIP — not started.** Needs `tools/fip_create` built and invoked with
+   `--bl31` and `--bl33`. Until `fip.bin` exists, the DT's PSCI block is
+   meaningful in principle and unreachable in practice.
 2. **PSCI is asserted, not confirmed — and the BSP never used it.** The 4.4
    kernel had `# CONFIG_ARM_PSCI is not set` (defconfig:454) and did SMP by
    poking SCU/reset registers from 32-bit code (`mach-hi3798mv2x/platsmp.c`).
