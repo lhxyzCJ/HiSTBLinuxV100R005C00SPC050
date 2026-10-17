@@ -188,7 +188,14 @@ if ! ( cd "$ROOT" && find . -print0 | cpio --null -o --format=newc 2>"$WORK/cpio
 fi
 
 # Final sanity gate: the archive must actually contain /init.
-if ! gzip -dc "$TMP_OUT" | grep -aq "./init"; then
+#
+# Decompress to a file first. Piping gzip into `grep -q` looks natural and is
+# wrong: grep -q exits at the first match, which closes the pipe, which SIGPIPEs
+# gzip, and under `set -o pipefail` the resulting 141 turns a SUCCESSFUL match
+# into a failing pipeline. On this script's first real run that produced a
+# false "does not contain /init" for a perfectly good archive.
+gzip -dc "$TMP_OUT" > "$WORK/plain.cpio"
+if ! grep -aq '\./init' "$WORK/plain.cpio"; then
 	echo "error: packed archive does not contain /init" >&2
 	rm -f "$TMP_OUT"
 	exit 1
