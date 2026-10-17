@@ -88,6 +88,7 @@ jobs:
             device-tree-compiler \
             cpio xz-utils \
             file \
+            u-boot-tools \
             rsync
 
       - name: Verify every tool this workflow relies on
@@ -99,7 +100,7 @@ jobs:
           # a tool or target that simply is not there -- fails in seconds with
           # a clear message instead of 23 minutes in.
           missing=0
-          for t in dtc cpio gzip file od stat awk sed grep sha256sum \
+          for t in dtc cpio gzip file od stat awk sed grep sha256sum mkimage \
                    readelf aarch64-linux-gnu-readelf aarch64-linux-gnu-gcc \
                    arm-linux-gnueabihf-gcc bison flex bc rsync curl tar; do
             if command -v "$t" >/dev/null 2>&1; then
@@ -272,6 +273,47 @@ jobs:
             2>&1 | tee -a "$GITHUB_WORKSPACE/build.log"
           ls -la arch/arm64/boot/Image
 
+      - name: Build BL33 uImage (Image + appended DTB)
+        run: |
+          set -euo pipefail
+          cd "$KERNEL_TREE"
+          # The uImage rule itself is appended to arch/arm64/boot/Makefile by
+          # porting/appends/. Mainline arm64 has no such target; the vendor
+          # loader needs one, with IH_ARCH_ARM64 and an FDT immediately after
+          # the payload, or it silently takes the 32-bit path.
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE uImage \
+            2>&1 | tee -a "$GITHUB_WORKSPACE/build.log"
+          ls -la arch/arm64/boot/uImage
+
+          img=arch/arm64/boot/uImage
+
+          # 1. The header must claim arm64, or load_fip.c never enters EL1.
+          mkimage -l "$img" | tee /tmp/uimage.txt
+          grep -qE 'Architecture:[[:space:]]+AArch64' /tmp/uimage.txt || {
+            echo "::error::uImage is not AArch64 -- the loader would use the 32-bit path"; exit 1; }
+
+          # 2. The payload size mkimage recorded; the DTB must start right after.
+          #    uImage header is 64 bytes; ih_size is a big-endian u32 at offset
+          #    12. This mirrors image_get_image_end() in the loader exactly
+          #    (hdr + sizeof(image_header_t) + ih_size).
+          #    Deliberately a one-liner: a heredoc's terminator would have to sit
+          #    at column 1, which terminates this YAML block scalar.
+          ih_size=$(python3 -c "import struct,sys; print(struct.unpack('>I', open(sys.argv[1],'rb').read(16)[12:16])[0])" "$img")
+          off=$((64 + ih_size))
+          echo "ih_size=$ih_size  DTB expected at offset $off"
+
+          # 3. fdt_check_header's equivalent: the DTB magic must be exactly there.
+          magic=$(od -An -tx1 -j"$off" -N4 "$img" | tr -d ' \n')
+          [ "$magic" = "d00dfeed" ] || {
+            echo "::error::no FDT at the end of the uImage payload (found $magic)"; exit 1; }
+
+          # 4. And it must be a DTB, not just four plausible bytes.
+          tail -c +$((off + 1)) "$img" > /tmp/appended.dtb
+          dtc -I dtb -O dts -o /tmp/appended.dts /tmp/appended.dtb 2>/dev/null
+          grep -q 'hi3798mv300' /tmp/appended.dts || {
+            echo "::error::appended FDT is not the hi3798mv300 board tree"; exit 1; }
+          echo "uImage OK: AArch64, ${ih_size} B payload, valid FDT appended"
+
       - name: Build aarch64 busybox for the initramfs
         run: |
           set -euo pipefail
@@ -341,6 +383,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp "$KERNEL_TREE/arch/arm64/boot/Image" dist/Image
+          cp "$KERNEL_TREE/arch/arm64/boot/uImage" dist/uImage
           cp "$KERNEL_TREE/arch/arm64/boot/dts/hisilicon/hi3798mv300-hi3798mv3dmm.dtb" \
              dist/hi3798mv300-hi3798mv3dmm.dtb
           cp initramfs.cpio.gz dist/
@@ -384,6 +427,24 @@ jobs:
           awk '/serial@8b00000/,/};/' /tmp/board.dts | grep -q 'status = "okay"' || {
             echo "::error::uart0 is not enabled in the DTB -- no console"; exit 1; }
           echo "  compatible, model, pl011, bootargs, memory, uart0 okay"
+
+          echo "--- BL33 uImage ---"
+          # Re-checked here, in the uploaded artifact rather than the build
+          # tree, because a copy step is exactly where this could be swapped
+          # for the wrong file.
+          mkimage -l uImage > /tmp/uimage2.txt
+          grep -qE 'Architecture:[[:space:]]+AArch64' /tmp/uimage2.txt || {
+            echo "::error::artifact uImage is not AArch64"; exit 1; }
+          ih_size=$(python3 -c "import struct; print(struct.unpack('>I', open('uImage','rb').read(16)[12:16])[0])")
+          off=$((64 + ih_size))
+          magic=$(od -An -tx1 -j"$off" -N4 uImage | tr -d ' \n')
+          [ "$magic" = "d00dfeed" ] || {
+            echo "::error::artifact uImage has no appended FDT (found $magic at $off)"; exit 1; }
+          tail -c +$((off + 1)) uImage > /tmp/app2.dtb
+          dtc -I dtb -O dts -o /tmp/app2.dts /tmp/app2.dtb 2>/dev/null
+          grep -q 'hisilicon,hi3798mv300' /tmp/app2.dts || {
+            echo "::error::artifact uImage has the wrong FDT appended"; exit 1; }
+          echo "  AArch64, $ih_size B payload, hi3798mv300 FDT appended at $off"
 
           echo "--- busybox + initramfs ---"
           ${CROSS_COMPILE}readelf -h busybox-aarch64 | grep -q AArch64 || {

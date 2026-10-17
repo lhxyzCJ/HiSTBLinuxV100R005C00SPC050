@@ -36,7 +36,7 @@ echo "==> applying overlay $OVERLAY -> $KERNEL_TREE"
 		echo "    ${rel#./}"
 	done
 
-# The DTS Makefile is the one file we cannot simply overwrite: it is a list of
+# The DTS Makefile is one file we cannot simply overwrite: it is a list of
 # dtb-$(CONFIG_...) += lines that upstream keeps editing. Append idempotently.
 DTS_MAKE="$KERNEL_TREE/arch/arm64/boot/dts/hisilicon/Makefile"
 DTB_LINE='dtb-$(CONFIG_ARCH_HISI) += hi3798mv300-hi3798mv3dmm.dtb'
@@ -50,6 +50,44 @@ if [[ -f "$DTS_MAKE" ]]; then
 else
 	echo "error: $DTS_MAKE not found" >&2
 	exit 1
+fi
+
+# porting/appends/<path>.append is appended to <kernel-tree>/<path>.
+#
+# Same reasoning as the DTS line, generalised: for files upstream keeps
+# editing, shipping a whole replacement Makefile would conflict on every
+# kernel bump, so we append a self-contained block instead. Idempotency is
+# keyed on the append file's first line, which is why every .append must open
+# with a unique marker comment.
+APPENDS="$(cd "$HERE/../appends" && pwd)"
+if [[ -d "$APPENDS" ]]; then
+	echo "==> applying appends $APPENDS"
+	(cd "$APPENDS" && find . -type f -name '*.append' -print0) |
+		while IFS= read -r -d '' rel; do
+			src="$APPENDS/${rel#./}"
+			dest="$KERNEL_TREE/${rel#./}"
+			dest="${dest%.append}"
+
+			if [[ ! -f "$dest" ]]; then
+				echo "error: append target does not exist: $dest" >&2
+				exit 1
+			fi
+
+			sentinel="$(head -n 1 "$src")"
+			if [[ -z "$sentinel" ]]; then
+				echo "error: $rel has an empty first line; it must open with a marker" >&2
+				exit 1
+			fi
+
+			if grep -qF "$sentinel" "$dest"; then
+				echo "    (already appended: ${dest#"$KERNEL_TREE"/})"
+				continue
+			fi
+
+			printf '\n' >> "$dest"
+			cat "$src" >> "$dest"
+			echo "    appended to ${dest#"$KERNEL_TREE"/}"
+		done
 fi
 
 echo "==> overlay applied"

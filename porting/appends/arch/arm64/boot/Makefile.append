@@ -1,0 +1,59 @@
+# HI3798MV300-FORWARD-PORT-APPEND v1 -- do not remove this marker line
+# ===========================================================================
+# Hi3798M V300 forward-port: uImage with appended DTB (the BL33 for the FIP)
+# ===========================================================================
+#
+# This block is appended to arch/arm64/boot/Makefile by
+# porting/scripts/apply-overlay.sh. It is kept separate rather than shipped as
+# a replacement Makefile, so that upstream edits to that file never conflict.
+#
+# WHY THIS EXISTS
+#
+# Mainline arm64 has no uImage target. The vendor loader on this board needs
+# one, and specifically needs the 64-bit variant. From
+# source/boot/fastboot/common/load_fip.c:249-266:
+#
+#     image_header_t *hdr = ...;
+#     if (image_check_arch(hdr, IH_ARCH_ARM64)) {
+#             char *fdt = (char *)image_get_image_end(hdr);
+#             ret = fdt_check_header(fdt);          /* the DTB is VALIDATED */
+#             if (ret) { ...goto error; }
+#             bl33_ep->args.arg0 = (uint64_t)((uint32_t)fdt);
+#             bl33_ep->spsr = SPSR_64(MODE_EL1, ...);
+#     } else {
+#             bl33_ep->spsr = SPSR_MODE32(MODE32_svc, ...);   /* no DTB, no PSCI */
+#     }
+#
+# So three things must all hold or the board silently takes the 32-bit path:
+#   - the uImage arch field is IH_ARCH_ARM64 (mkimage -A arm64, via
+#     UIMAGE_ARCH ?= $(SRCARCH)),
+#   - an FDT sits immediately after the uImage payload, and
+#   - that FDT passes fdt_check_header.
+#
+# The payload is padded to 4 KiB first so the appended DTB starts on a
+# boundary. Note that the 4.4 BSP did this by rewriting Image in place
+# (`dd ... of=$<.dd && mv $<.dd $<`); this version pads into a scratch file
+# instead, because rewriting a prerequisite leaves Image newer than every
+# target derived from it and invites spurious rebuilds.
+
+targets += uImage
+
+UIMAGE_LOADADDR = 0x2000000
+UIMAGE_ENTRYADDR = $(TEXT_OFFSET)
+UIMAGE_COMPRESSION = none
+
+HI3798MV300_DTB := $(obj)/dts/hi3798mv300-hi3798mv3dmm.dtb
+
+quiet_cmd_hi3798mv300_uimage = UIMAGE  $@
+      cmd_hi3798mv300_uimage =					\
+	dd if=$(obj)/Image of=$(obj)/Image.pad bs=4096 conv=sync 2>/dev/null;	\
+	$(BASH) $(MKIMAGE) -A $(UIMAGE_ARCH) -O linux			\
+		-C $(UIMAGE_COMPRESSION) -T kernel			\
+		-a $(UIMAGE_LOADADDR) -e $(UIMAGE_ENTRYADDR)		\
+		-n '$(UIMAGE_NAME)' -d $(obj)/Image.pad $@;		\
+	rm -f $(obj)/Image.pad;						\
+	cat $(HI3798MV300_DTB) >> $@;					\
+	printf '  APPEND  %s to %s\n' '$(notdir $(HI3798MV300_DTB))' '$@'
+
+$(obj)/uImage: $(obj)/Image $(HI3798MV300_DTB) FORCE
+	$(call if_changed,hi3798mv300_uimage)
