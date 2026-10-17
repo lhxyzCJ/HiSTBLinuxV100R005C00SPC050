@@ -39,7 +39,14 @@
 targets += uImage
 
 UIMAGE_LOADADDR = 0x2000000
-UIMAGE_ENTRYADDR = $(TEXT_OFFSET)
+# Do NOT copy the 4.4 BSP's `UIMAGE_ENTRYADDR = $(TEXT_OFFSET)`: TEXT_OFFSET
+# no longer exists in 6.18 (arm64 images became relocatable and the text offset
+# went away). An empty $(TEXT_OFFSET) makes `-e` consume the NEXT flag as its
+# argument, which mkimage reports as the memorably unhelpful
+#     /usr/bin/mkimage: invalid entry point -n
+# The entry point is unused by this loader anyway -- load_fip.c sets
+# bl33_ep->pc from image_get_data(hdr) -- so match mkimage's own default.
+UIMAGE_ENTRYADDR = $(UIMAGE_LOADADDR)
 UIMAGE_COMPRESSION = none
 
 # The DTB lives in the hisilicon/ subdirectory of the arm64 dts tree, which is
@@ -51,7 +58,10 @@ UIMAGE_COMPRESSION = none
 HI3798MV300_DTB := $(obj)/dts/hisilicon/hi3798mv300-hi3798mv3dmm.dtb
 
 quiet_cmd_hi3798mv300_uimage = UIMAGE  $@
-      cmd_hi3798mv300_uimage =					\
+      cmd_hi3798mv300_uimage =						\
+	[ -n "$(UIMAGE_LOADADDR)" ] && [ -n "$(UIMAGE_ENTRYADDR)" ] || {	\
+	  echo 'hi3798mv300: UIMAGE_LOADADDR/UIMAGE_ENTRYADDR must be non-empty;' >&2; \
+	  echo '  an empty value silently shifts mkimage arguments.' >&2; false; }; \
 	dd if=$(obj)/Image of=$(obj)/Image.pad bs=4096 conv=sync 2>/dev/null;	\
 	$(BASH) $(MKIMAGE) -A $(UIMAGE_ARCH) -O linux			\
 		-C $(UIMAGE_COMPRESSION) -T kernel			\
