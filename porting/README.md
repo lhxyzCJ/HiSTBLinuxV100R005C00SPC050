@@ -18,7 +18,7 @@ Honest accounting of what has and has not been proven.
 | **Kernel compiles** (CI run 38997330115, 22m34s, all steps green) | ✅ **done** |
 | **`Image` is a valid arm64 boot image** (magic `ARMd`, 47.4 MiB) | ✅ verified |
 | **Device tree built and carries the right bindings** | ✅ verified |
-| **initramfs contains a target-architecture busybox** | ⏳ **pending — no green run has demonstrated it yet** |
+| **initramfs contains an AArch64 busybox** | ✅ verified — run 39016830625 |
 | **Board can enter the kernel this produces** | ❌ **no — boot chain not delivered** |
 | **Boots on hardware** | ❌ not yet |
 
@@ -28,7 +28,8 @@ Build artifacts of the verified run:
 |---|---|---|
 | `Image` | 47.4 MiB | header magic `0x644d5241` (`ARMd`); `image_size` 48.2 MiB, the delta being BSS |
 | `hi3798mv300-hi3798mv3dmm.dtb` | 3.3 KiB | `compatible` contains `hisilicon,hi3798mv300`; `serial@{8b00000,8b02000,8b03000}` bound to `arm,pl011`; uart0 `okay` |
-| `initramfs.cpio.gz` | 1.06 MiB | ~~static aarch64 busybox~~ — **this was x86-64 in runs 1-3**; fixed in `a6290cf92`, not yet confirmed green |
+| `initramfs.cpio.gz` | 1.13 MiB | ✅ run 39016830625: unpacked, contains `init`, `/bin/busybox` is ELF `e_machine=0xb7` (AArch64), 2 171 544 B. In runs 1-3 this same file held an x86-64 busybox — see the correction below. |
+| `busybox-aarch64` | 2.07 MiB | the cross-built binary that goes into the archive; `readelf -h` asserted AArch64 in CI before packing |
 | `kernel.config` | — | `Linux/arm64 6.18.57` |
 
 > **Correction: the first two runs shipped a broken initramfs, and this table
@@ -48,12 +49,31 @@ Build artifacts of the verified run:
 > first draft of this very paragraph marked the new initramfs "✅ verified"
 > while the only CI run for that commit was still `in_progress` — the exact
 > anti-pattern being apologised for, one paragraph above its own apology. A
-> second audit caught it. The status row now reads "pending" and will stay
-> that way until the run is green and its hashes can be quoted here.
+> second audit caught it. The status row was demoted to "pending" and only
+> promoted once run 39016830625 went green **and** the archive had been
+> unpacked and its `e_machine` read directly.
 >
 > The lesson worth keeping: an `ls`-style check and a green tick are not
 > evidence. A claim of "verified" has to name the run, the check, and the
 > value observed.
+>
+> **Fixing it took six CI cycles**, and five of the six failures were in the
+> scaffolding written to *prove* the initramfs was good, not in the port:
+>
+> | Cycle | Failure | Class |
+> |---|---|---|
+> | 1 | `make olddefconfig` has no such target in BusyBox | build assumption never executed |
+> | 2 | cross libc headers absent (only *Recommends*, skipped by `--no-install-recommends`) | environment assumption never executed |
+> | 3 | `tc` applet references CBQ constants modern headers deleted | upstream incompatibility |
+> | 4 | `gzip -dc \| grep -q` SIGPIPEs gzip; `pipefail` turns a match into a failure | check bug #1 |
+> | 5 | `cpio` rewrites `./init` to `init`, so the pattern could never match | check bug #2, same check |
+> | 6 | green | — |
+>
+> Two things worth carrying forward. First, **a check can have more than one
+> bug**: cycle 5 was spent re-learning that, after cycle 4 was "fixed".
+> Second, the kernel build stayed green through all of this because it is
+> freestanding and uses well-trodden idioms; every assumption that broke was
+> in userspace tooling that had never been run before.
 
 The build is deterministic where it matters. A second run (38998979429) was
 made after removing a dead `CONFIG_ARM_GIC_V3=n` line to confirm it changed
