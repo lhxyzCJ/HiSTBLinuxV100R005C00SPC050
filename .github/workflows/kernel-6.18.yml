@@ -288,9 +288,17 @@ jobs:
           img=arch/arm64/boot/uImage
 
           # 1. The header must claim arm64, or load_fip.c never enters EL1.
+          #
+          #    Read ih_arch out of the header (byte 29) rather than parsing
+          #    `mkimage -l`. mkimage's listing has no "Architecture:" field at
+          #    all -- it folds the arch into "Image Type: AArch64 Linux ..." --
+          #    so grepping for one produces a false negative on a perfectly
+          #    good image. The byte is the authoritative value; the prose is
+          #    only a rendering of it.
           mkimage -l "$img" | tee /tmp/uimage.txt
-          grep -qE 'Architecture:[[:space:]]+AArch64' /tmp/uimage.txt || {
-            echo "::error::uImage is not AArch64 -- the loader would use the 32-bit path"; exit 1; }
+          ih_arch=$(python3 -c "import sys; print(open(sys.argv[1],'rb').read(30)[29])" "$img")
+          [ "$ih_arch" = "22" ] || {
+            echo "::error::uImage ih_arch=$ih_arch, expected 22 (IH_ARCH_ARM64) -- the loader would use the 32-bit path"; exit 1; }
 
           # 2. The payload size mkimage recorded; the DTB must start right after.
           #    uImage header is 64 bytes; ih_size is a big-endian u32 at offset
@@ -433,8 +441,9 @@ jobs:
           # tree, because a copy step is exactly where this could be swapped
           # for the wrong file.
           mkimage -l uImage > /tmp/uimage2.txt
-          grep -qE 'Architecture:[[:space:]]+AArch64' /tmp/uimage2.txt || {
-            echo "::error::artifact uImage is not AArch64"; exit 1; }
+          ih_arch=$(python3 -c "print(open('uImage','rb').read(30)[29])")
+          [ "$ih_arch" = "22" ] || {
+            echo "::error::artifact uImage ih_arch=$ih_arch, expected 22 (IH_ARCH_ARM64)"; exit 1; }
           ih_size=$(python3 -c "import struct; print(struct.unpack('>I', open('uImage','rb').read(16)[12:16])[0])")
           off=$((64 + ih_size))
           magic=$(od -An -tx1 -j"$off" -N4 uImage | tr -d ' \n')
