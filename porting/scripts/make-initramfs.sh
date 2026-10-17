@@ -189,17 +189,33 @@ fi
 
 # Final sanity gate: the archive must actually contain /init.
 #
-# Decompress to a file first. Piping gzip into `grep -q` looks natural and is
-# wrong: grep -q exits at the first match, which closes the pipe, which SIGPIPEs
-# gzip, and under `set -o pipefail` the resulting 141 turns a SUCCESSFUL match
-# into a failing pipeline. On this script's first real run that produced a
-# false "does not contain /init" for a perfectly good archive.
+# Two traps live here, both of which cost a CI round-trip to find:
+#
+#  1. cpio normalises a leading "./" away. `find .` emits "./init", but the
+#     archive entry is "init". Grepping the packed bytes for "./init" can
+#     therefore never match, however healthy the archive is.
+#  2. Piping gzip into `grep -q` SIGPIPEs gzip the moment grep exits, and under
+#     `set -o pipefail` that 141 overrides grep's success.
+#
+# So: decompress to a file, list the archive with cpio itself, and match the
+# listing with an exact-line regex that tolerates either spelling. On failure
+# dump the listing -- the alternative is another 20-minute cycle spent guessing.
 gzip -dc "$TMP_OUT" > "$WORK/plain.cpio"
-if ! grep -aq '\./init' "$WORK/plain.cpio"; then
-	echo "error: packed archive does not contain /init" >&2
+if ! ( cd "$WORK" && cpio -t --quiet < plain.cpio ) > "$WORK/list.txt" 2>"$WORK/list.err"; then
+	echo "error: could not list the packed archive" >&2
+	cat "$WORK/list.err" >&2 || true
 	rm -f "$TMP_OUT"
 	exit 1
 fi
+if ! grep -qxE '(\./)?init' "$WORK/list.txt"; then
+	echo "error: packed archive does not contain /init" >&2
+	echo "--- archive listing (first 15 entries) ---" >&2
+	head -15 "$WORK/list.txt" >&2
+	echo "--- end listing ---" >&2
+	rm -f "$TMP_OUT"
+	exit 1
+fi
+echo "==> archive verified: $(wc -l < "$WORK/list.txt") entries, /init present"
 
 mv "$TMP_OUT" "$OUT"
 echo "==> $(du -h "$OUT" | cut -f1) written"
