@@ -1,0 +1,29 @@
+# HI3798MV300-FORWARD-PORT-APPEND v1 -- do not remove this marker line
+# ===========================================================================
+# Hi3798M V300 forward-port: expose `make uImage` at the top level
+# ===========================================================================
+#
+# This block is appended to arch/arm64/Makefile by
+# porting/scripts/apply-overlay.sh.
+#
+# WHY THIS IS NEEDED, SEPARATELY FROM arch/arm64/boot/Makefile
+#
+# The boot Makefile can define $(obj)/uImage and the target will still be
+# unreachable from the top level: KMbuild has no implicit rule mapping `make
+# uImage` onto arch/arm64/boot/uImage. arm32 solves this by naming uImage in
+# BOOT_TARGETS (arch/arm/Makefile:291); arm64's BOOT_TARGETS is
+# `Image vmlinuz.efi image.fit` and has no uImage. Without the rule below,
+# `make uImage` fails with "No rule to make target 'uImage'".
+#
+# Note the deliberate choice of a standalone rule rather than
+# `BOOT_TARGETS += uImage`: the existing `$(BOOT_TARGETS): vmlinux` rule
+# expands its target list at parse time, so a later append would not reach it
+# and the failure would look identical to having done nothing.
+#
+# $(boot)/$@ resolves to arch/arm64/boot/uImage, which is the target the
+# appended block in arch/arm64/boot/Makefile defines.
+
+PHONY += uImage
+
+uImage: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
