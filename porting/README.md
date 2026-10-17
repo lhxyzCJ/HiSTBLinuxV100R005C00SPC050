@@ -15,15 +15,38 @@ Honest accounting of what has and has not been proven.
 | Workflow YAML parses | ✅ done |
 | Register windows cross-checked against mainline `hi3798cv200` | ✅ done |
 | Vendor API drift quantified across 11 466 files | ✅ done |
-| **Kernel actually compiles** | ❌ **not yet — see below** |
+| **Kernel compiles** (CI run 38997330115, 22m34s, all steps green) | ✅ **done** |
+| **`Image` is a valid arm64 boot image** (magic `ARMd`, 47.4 MiB) | ✅ verified |
+| **Device tree built and carries the right bindings** | ✅ verified |
+| **initramfs built** (1.06 MiB static busybox) | ✅ verified |
 | **Boots on hardware** | ❌ not yet |
 
-> **The build has never run.** By project decision all compilation happens in
-> GitHub Actions and never on a development machine, so the first real
-> compile is the first run of `.github/workflows/kernel-6.18.yml`. Treat
-> `porting/overlay/` as reviewed-but-unbuilt source until that workflow is
-> green. The device trees in particular have been desk-checked against the
-> 4.4 BSP and against mainline `hi3798cv200.dtsi`, not compiled.
+Build artifacts of the verified run:
+
+| Artifact | Size | Check |
+|---|---|---|
+| `Image` | 47.4 MiB | header magic `0x644d5241` (`ARMd`); `image_size` 48.2 MiB, the delta being BSS |
+| `hi3798mv300-hi3798mv3dmm.dtb` | 3.3 KiB | `compatible = "hisilicon,hi3798mv300"`; `serial@{8b00000,8b02000,8b03000}` bound to `arm,pl011` |
+| `initramfs.cpio.gz` | 1.06 MiB | static busybox |
+| `kernel.config` | — | `Linux/arm64 6.18.57` |
+
+All three binaries pass `sha256sum -c SHA256SUMS`.
+
+> **Still unproven: everything past the compiler.** The kernel has never been
+> executed. Compilation confirms the device trees and configuration are
+> self-consistent, but says nothing about whether the firmware hands control
+> to a 64-bit kernel, whether PSCI is actually implemented, or whether the
+> memory map is right. See Risks — those are all hardware questions.
+>
+> Two configuration traps were found and fixed while getting this green, both
+> of which fail *silently* rather than loudly:
+> - `CONFIG_PSCI_FW` does not exist; the symbol is `ARM_PSCI_FW`.
+> - `CONFIG_COMPAT_VDSO` additionally requires `CROSS_COMPILE_COMPAT` to point
+>   at a 32-bit ARM toolchain, so CI installs `gcc-arm-linux-gnueabihf`.
+>
+> Note also that `ARM_GIC`, `ARM_GIC_V3`, `ARM_GIC_V5` and `ARM_PSCI_FW` are
+> unconditionally `select`ed by `config ARM64` and cannot be disabled from a
+> fragment. The device tree decides which GIC actually binds.
 
 ## Why this port is tractable
 
